@@ -120,6 +120,7 @@ test("every wire ends with a straight run into its card, long enough to carry th
     assert.equal(ya, yb, `${link.id} does not arrive horizontally`);
     assert.ok(xb - xa >= 24, `${link.id} arrives over only ${xb - xa}px`);
     const target = layout.nodes.find((card) => card.id === link.target);
-    assert.ok(xb < target.x && target.x - xb <= 4, `${link.id} does not end at its card`);
+    // The wire stops mid-arrowhead: 5px of head lies beyond it, then a 3px gap to the card.
+    assert.equal(target.x - xb, 8, `${link.id} does not end mid-arrowhead at its card`);
   }
 });

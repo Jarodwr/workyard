@@ -270,8 +270,9 @@ export type RoutedEdge = { d: string; points: Point[] };
 const CLEARANCE = 6; // space kept between a wire and a card
 const TRACK = 5; // distance between parallel wires
 const GUTTER_INSET = 14; // first track's distance from a card's side
-const ARRIVAL_RUN = 30; // straight run into a card, long enough for the arrowhead to sit on it
-const ARROW_GAP = 3; // where a wire ends, short of the card's edge
+const ARRIVAL_RUN = 34; // straight run into a card, long enough for the arrowhead to sit on it
+const ARROW_GAP = 3; // the arrow tip's distance from the card's edge
+const ARROW_HALF = 5; // half the arrowhead's length: a wire ends at the middle of its arrowhead
 const TOP_BAND_PENALTY = 60; // corridors above the first row sit under the sticky phase header
 
 /** Does a horizontal run at `y` between `xa` and `xb` touch a card other than `skip`? */
@@ -428,7 +429,7 @@ export function routeDependencyEdges(nodes: LayoutNode[], edges: GraphEdgeInput[
     const used = keys.get(route)!;
     const yc = corridorY.get(route) ?? route.y1;
     const xIn = route.x2 - ARRIVAL_RUN - (used.in ? trackOf.get(used.in)! * TRACK : 0);
-    const end: Point = [route.x2 - ARROW_GAP, route.y2];
+    const end: Point = [route.x2 - ARROW_GAP - ARROW_HALF, route.y2];
     let points: Point[];
     if (route.corridor === null) {
       points = [[route.x1, route.y1], [xIn, route.y1], [xIn, route.y2], end];
