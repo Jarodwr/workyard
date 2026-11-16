@@ -17,6 +17,10 @@ struct Cli {
     actor: String,
     #[arg(long, global = true)]
     json: bool,
+    /// Migrate the database even while an orchestrator started by an older schema is running
+    /// (also WORKYARD_ALLOW_MIGRATE=1)
+    #[arg(long, global = true)]
+    allow_migrate: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -383,6 +387,21 @@ enum OrchCommand {
         /// Do not send desktop notifications
         #[arg(long)]
         no_notify: bool,
+        /// Keep each card's worktree and branch after it is Done and merged (they are removed
+        /// by default)
+        #[arg(long)]
+        keep_worktrees: bool,
+    },
+    /// Restart a board's orchestrator on the current binary: drain, wait for workers to pause or
+    /// finish, release the lease, then replace this process with `orch run <board> <args>`.
+    Restart {
+        board: String,
+        /// Seconds to wait for workers before giving up
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        /// Arguments for `orch run`, after `--` (for example `-- --pool 3 --cwd .`)
+        #[arg(last = true, allow_hyphen_values = true)]
+        run_args: Vec<String>,
     },
     /// Show the board's orchestrator: state, cursor, pool size, and lease.
     Status { board: String },
@@ -906,6 +925,45 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
     })
 }
 
+/// Drain, wait for the board's workers to pause or finish, release the lease the old
+/// orchestrator holds, then re-exec this binary as `orch run`. Returns only on failure.
+fn restart_orchestrator(store: &Store, actor: &str, board: &str, timeout: u64, run_args: &[String]) -> workyard_core::Result<Value> {
+    store.orchestrator_set_state(actor, board, "draining")?;
+    eprintln!("Draining {board}; waiting up to {timeout}s for workers to pause or finish.");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    while store.orchestrator_active_workers(board)? > 0 {
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::new("restart_timeout", format!("workers on {board} did not pause or finish within {timeout}s"))
+                .hint("The board is left draining. Retry with a longer --timeout, or `workyard orch resume` to undo"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let status = store.orchestrator_status(board)?;
+    if status["connected"] == true {
+        let holder = format!("orch:{}#{}", status["board_key"].as_str().unwrap_or(board), status["epoch"]);
+        store.orchestrator_release(&holder, board)?;
+        eprintln!("Released the lease held by {}.", status["holder"].as_str().unwrap_or("the old orchestrator"));
+    }
+    store.orchestrator_set_state(actor, board, "running")?;
+    let exe = std::env::current_exe().map_err(|e| Error::new("restart_failed", format!("cannot find this binary: {e}")))?;
+    let mut command = std::process::Command::new(exe);
+    if let Some(db) = std::env::args().skip_while(|a| a != "--db").nth(1) {
+        command.args(["--db", &db]);
+    }
+    command.args(["orch", "run", board]).args(run_args);
+    eprintln!("Starting the orchestrator on this binary.");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(Error::new("restart_failed", format!("could not re-exec: {}", command.exec())))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().map_err(|e| Error::new("restart_failed", e.to_string()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
 fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::Result<Value> {
     Ok(match command {
         OrchCommand::Run {
@@ -920,7 +978,9 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             cwd,
             max_failures,
             no_notify,
-        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, supervisor, plugin_dir, cwd, max_failures, !no_notify)?,
+            keep_worktrees,
+        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, supervisor, plugin_dir, cwd, max_failures, !no_notify, keep_worktrees)?,
+        OrchCommand::Restart { board, timeout, run_args } => restart_orchestrator(store, actor, &board, timeout, &run_args)?,
         OrchCommand::Status { board } => store.orchestrator_status(&board)?,
         OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
         OrchCommand::Resume { board } => store.orchestrator_set_state(actor, &board, "running")?,
@@ -1101,6 +1161,7 @@ fn run_orchestrator(
     cwd: Option<PathBuf>,
     max_failures: u32,
     notify: bool,
+    keep_worktrees: bool,
 ) -> workyard_core::Result<Value> {
     let db = store.path().to_path_buf();
     let mut log_dir = db.clone().into_os_string();
@@ -1136,6 +1197,7 @@ fn run_orchestrator(
             Permissions::Safe => "safe".into(),
         },
         supervisor,
+        keep_worktrees,
         ..Options::default()
     };
     eprintln!("Orchestrating {board}. Press Ctrl-C to stop; workers are paused and the lease released.");
@@ -1179,7 +1241,7 @@ fn main() {
             Some(path) => Ok(path.clone()),
             None => Store::default_path(),
         };
-        if let Err(error) = path.and_then(|p| follow_events(&Store::new(p), *since, *limit)) {
+        if let Err(error) = path.and_then(|p| follow_events(&Store::new(p).allow_migrate(cli.allow_migrate), *since, *limit)) {
             eprintln!("{error}");
             std::process::exit(exit_code(&error));
         }
@@ -1189,7 +1251,7 @@ fn main() {
         Some(path) => Ok(path),
         None => Store::default_path(),
     };
-    let result = path.and_then(|path| run(&Store::new(path), &cli.actor, cli.command));
+    let result = path.and_then(|path| run(&Store::new(path).allow_migrate(cli.allow_migrate), &cli.actor, cli.command));
     match result {
         Ok(data) => {
             if cli.json {

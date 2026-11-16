@@ -49,7 +49,7 @@ impl Error {
         }
     }
 
-    fn hint(mut self, hint: impl Into<String>) -> Self {
+    pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
     }
@@ -85,6 +85,7 @@ impl From<serde_json::Error> for Error {
 #[derive(Debug, Clone)]
 pub struct Store {
     path: PathBuf,
+    allow_migrate: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -98,7 +99,14 @@ pub struct BoardFilter {
 
 impl Store {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self { path: path.into(), allow_migrate: false }
+    }
+
+    /// Let this store migrate a database whose orchestrator was started by an older schema.
+    /// `WORKYARD_ALLOW_MIGRATE=1` does the same.
+    pub fn allow_migrate(mut self, allow: bool) -> Self {
+        self.allow_migrate = allow;
+        self
     }
 
     pub fn default_path() -> Result<PathBuf> {
@@ -150,7 +158,7 @@ impl Store {
         db.pragma_update(None, "foreign_keys", "ON")?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.busy_timeout(Duration::from_secs(5))?;
-        migrate(&mut db)?;
+        migrate(&mut db, self.allow_migrate)?;
         Ok(db)
     }
 
@@ -1710,11 +1718,11 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
+pub(crate) const SCHEMA_VERSION: i64 = 19;
 /// Largest markdown report a card may hold.
 pub const MAX_REPORT_BYTES: usize = 256 * 1024;
-const SCHEMA_VERSION: i64 = 18;
 
-fn migrate(db: &mut Connection) -> Result<()> {
+fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version == SCHEMA_VERSION {
         return Ok(());
@@ -1731,6 +1739,9 @@ fn migrate(db: &mut Connection) -> Result<()> {
     }
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if !allow_migrate && std::env::var("WORKYARD_ALLOW_MIGRATE").map_or(true, |v| v != "1") {
+        orchestrator::check_migration_allowed(&tx, version)?;
+    }
     if version == 0 {
         tx.execute_batch(include_str!("../migrations/001.sql"))?;
         tx.execute(
@@ -1912,6 +1923,15 @@ fn migrate(db: &mut Connection) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 18")?;
+        version = 18;
+    }
+    if version == 18 {
+        tx.execute_batch(include_str!("../migrations/019.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (19,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 19")?;
     }
     tx.commit()?;
     Ok(())
