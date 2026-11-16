@@ -403,6 +403,7 @@ fn a_paused_worker_resumes_with_the_answer_in_its_briefing() {
     assert_eq!(launches[1].0, key);
     assert!(launches[1].1, "second launch resumes the session");
     assert!(launches[1].2.contains("question_answered"), "answer delivered in the briefing");
+    assert!(launches[1].2.contains("resume only once every one holds"), "combined waits are explained");
 }
 
 #[test]

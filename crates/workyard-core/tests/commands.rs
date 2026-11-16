@@ -1887,9 +1887,7 @@ fn a_session_waiting_for_review_resumes_only_once_the_commit_is_approved() {
     // A plain pause is unchanged: eligible straight away.
     store.pause_task_session("worker", key, None).unwrap();
     assert_eq!(store.next_ready_task(&board, None).unwrap()["dispatch_action"], "resume");
-    // Waiting for a question and for review at once is rejected.
-    store.resume_task_session("orch", key).unwrap();
-    assert_eq!(store.pause_task_session_for("worker", key, Some("Q-1"), true).unwrap_err().code, "validation_error");
+    // Waiting for a question and for review at once is allowed; see the integration tests.
 }
 
 #[test]

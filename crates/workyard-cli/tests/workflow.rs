@@ -290,17 +290,15 @@ fn cli_review_setting_permissions_and_integration_pause() {
     assert_eq!(ok(&["plan", "board-review", key, "off"])["review_required"], false);
     assert_eq!(ok(&["orch", "status", key])["permissions"], "full");
 
-    // Pausing for integration is a real wait kind, and it cannot be combined with another.
+    // Pausing for integration is a real wait kind, and it combines with the others.
     let card = ok(&["task", "add-card", key, "Work"]);
     let card_key = card["key"].as_str().unwrap();
     ok(&["task", "claim", card_key, "--expected-version", "1"]);
     ok(&["task", "move", card_key, "In Progress"]);
     ok(&["orch", "session", "attach", card_key, "--runner", "claude", "--session-id", "s-1"]);
-    let (success, error) = run(&["orch", "session", "pause", card_key, "--for-review", "--for-integration"]);
-    assert!(!success);
-    assert_eq!(error["error"]["code"], "validation_error");
-    let paused = ok(&["orch", "session", "pause", card_key, "--for-integration"]);
+    let paused = ok(&["orch", "session", "pause", card_key, "--for-review", "--for-integration"]);
     assert_eq!(paused["waiting_integration"], true);
+    assert_eq!(paused["waiting_review"], true);
 }
 
 #[test]
