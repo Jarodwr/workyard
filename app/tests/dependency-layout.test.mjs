@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildDependencyLayout, buildPhaseDependencyLayout, GRAPH_NODE_HEIGHT, GRAPH_NODE_WIDTH,
+  buildDependencyLayout, buildPhaseDependencyLayout, GRAPH_HEADER_HEIGHT, GRAPH_NODE_HEIGHT, GRAPH_NODE_WIDTH, GRAPH_ZOOM_LEVELS, graphFrame,
   questionOnlyBlockerCounts, routeDependencyEdges, traceDependencies,
 } from "../src/lib/dependency-layout.ts";
 
@@ -115,12 +115,86 @@ test("a wire that skips a column avoids cards, and avoids the header band when i
 test("every wire ends with a straight run into its card, long enough to carry the arrowhead", () => {
   const { layout, routes } = todoBoard();
   for (const link of layout.edges) {
+    if (!routes.get(link.id).arrowhead) continue; // merged wires end at the trunk
     const points = routes.get(link.id).points;
     const [[xa, ya], [xb, yb]] = segments(points).at(-1);
     assert.equal(ya, yb, `${link.id} does not arrive horizontally`);
     assert.ok(xb - xa >= 24, `${link.id} arrives over only ${xb - xa}px`);
     const target = layout.nodes.find((card) => card.id === link.target);
     // The wire stops mid-arrowhead: 5px of head lies beyond it, then a 3px gap to the card.
-    assert.equal(target.x - xb, 8, `${link.id} does not end mid-arrowhead at its card`);
+    if (routes.get(link.id).arrowhead) assert.equal(target.x - xb, 8, `${link.id} does not end mid-arrowhead at its card`);
   }
+});
+
+const noCrossings = (layout, routes) => {
+  for (const link of layout.edges) {
+    for (const [[xa, ya], [xb, yb]] of segments(routes.get(link.id).points)) {
+      for (const card of layout.nodes) {
+        if (card.id === link.source || card.id === link.target) continue;
+        const crosses = Math.min(xa, xb) < card.x + GRAPH_NODE_WIDTH && Math.max(xa, xb) > card.x
+          && Math.min(ya, yb) < card.y + GRAPH_NODE_HEIGHT && Math.max(ya, yb) > card.y;
+        assert.ok(!crosses, `${link.id} crosses ${card.id}`);
+      }
+    }
+  }
+};
+
+test("wires merging into one card draw a single arrowhead; the rest end at the trunk", () => {
+  const { layout, routes } = todoBoard();
+  const incomingTo = new Map();
+  for (const link of layout.edges) incomingTo.set(link.target, [...(incomingTo.get(link.target) ?? []), link]);
+  for (const [target, links] of incomingTo) {
+    const heads = links.filter((link) => routes.get(link.id).arrowhead);
+    assert.equal(heads.length, 1, `${target} has ${heads.length} arrowheads`);
+    const card = layout.nodes.find((item) => item.id === target);
+    for (const link of links) {
+      const [, [x, y]] = segments(routes.get(link.id).points).at(-1);
+      if (routes.get(link.id).arrowhead) continue;
+      assert.ok(x < card.x - 8, `${link.id} runs on to the arrowhead`);
+      assert.equal(y, card.y + GRAPH_NODE_HEIGHT / 2);
+    }
+  }
+  assert.ok(incomingTo.get("C-7").length >= 3);
+});
+
+function bigBoard() {
+  const phases = ["p1", "p2", "p3"].map((id) => ({ id, name: id, status: "current" }));
+  const nodes = Array.from({ length: 20 }, (_, i) => ({ ...node(`N${String(i).padStart(2, "0")}`), phase_id: phases[i < 7 ? 0 : i < 14 ? 1 : 2].id }));
+  const edges = [];
+  for (let i = 1; i < 20; i++) {
+    edges.push(edge(nodes[Math.floor(i / 2) - (i > 12 ? 1 : 0)].id, nodes[i].id));
+    if (i > 3) edges.push(edge(nodes[i - 3].id, nodes[i].id));
+    if (i > 8 && i % 3 === 0) edges.push(edge(nodes[i - 8].id, nodes[i].id));
+  }
+  const unique = [...new Map(edges.map((link) => [link.id, link])).values()];
+  const layout = buildPhaseDependencyLayout(nodes, unique, phases);
+  return { layout, routes: routeDependencyEdges(layout.nodes, layout.edges) };
+}
+
+test("a 20-card board over three phases routes every wire clear of every card", () => {
+  const { layout, routes } = bigBoard();
+  assert.equal(layout.nodes.length, 20);
+  assert.equal(routes.size, layout.edges.length);
+  noCrossings(layout, routes);
+  const merges = new Map();
+  for (const link of layout.edges) if (routes.get(link.id).arrowhead) merges.set(link.target, (merges.get(link.target) ?? 0) + 1);
+  assert.ok([...merges.values()].every((count) => count === 1));
+});
+
+test("at every zoom level the graph sits below the sticky header and wires stay inside it", () => {
+  for (const { layout, routes } of [todoBoard(), bigBoard()]) {
+    noCrossings(layout, routes);
+    for (const zoom of GRAPH_ZOOM_LEVELS) {
+      const frame = graphFrame(layout, zoom);
+      assert.equal(frame.contentTop, GRAPH_HEADER_HEIGHT);
+      for (const { points } of routes.values()) {
+        for (const [x, y] of points) {
+          assert.ok(frame.contentTop + y * zoom >= GRAPH_HEADER_HEIGHT, `wire under the header at ${zoom}`);
+          assert.ok(frame.contentTop + y * zoom <= frame.height, `wire below the graph at ${zoom}`);
+          assert.ok(x * zoom >= 0 && x * zoom <= frame.width, `wire outside the graph at ${zoom}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual([...GRAPH_ZOOM_LEVELS], [0.5, 0.75, 1, 1.5]);
 });
