@@ -26,6 +26,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+tdir=${CARGO_TARGET_DIR:-$root/target}
 host=$(rustc -vV | sed -n 's/^host: //p')
 triple=${target:-$host}
 ext=""
@@ -52,7 +53,7 @@ flags=""
 [ -n "$target" ] && flags="$flags --target $target"
 # shellcheck disable=SC2086
 (cd "$root" && cargo build -p workyard-cli $flags)
-if [ -n "$target" ]; then src="$root/target/$target/$profile/workyard"; else src="$root/target/$profile/workyard"; fi
+if [ -n "$target" ]; then src="$tdir/$target/$profile/workyard"; else src="$tdir/$profile/workyard"; fi
 mkdir -p "$root/app/src-tauri/binaries"
 cp "$src$ext" "$staged"
 echo "staged app/src-tauri/binaries/workyard-$triple$ext ($profile)"

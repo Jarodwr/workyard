@@ -81,7 +81,7 @@ While an orchestrator run is in progress, run the desktop from a copied binary i
 
 ```sh
 scripts/stage-sidecar.sh --debug && (cd app && npx tauri build --debug --bundles app)
-cp -R target/debug/bundle/macos/Workyard.app /tmp/Workyard-run.app
+cp -R "${CARGO_TARGET_DIR:-target}"/debug/bundle/macos/Workyard.app /tmp/Workyard-run.app
 open /tmp/Workyard-run.app
 ```
 
