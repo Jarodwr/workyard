@@ -24,12 +24,21 @@ struct FakeRunner {
     launches: Arc<Mutex<Vec<(String, bool, String)>>>,
     /// Reported (once) by the next worker to exit, as if it had run into a usage limit.
     limit_next: Arc<Mutex<Option<LimitHit>>>,
+    /// When set, workers exit with a failure status instead of a clean one.
+    crashes: Arc<AtomicBool>,
+    /// What every worker reports as its activity, and the denials it hands over (once).
+    activity: Arc<Mutex<Option<String>>>,
+    denials: Arc<Mutex<Vec<String>>>,
+    checkout: Option<PathBuf>,
     /// Everything `send` delivered to any worker, and how many workers were stopped.
     messages: Arc<Mutex<Vec<String>>>,
     stops: Arc<AtomicUsize>,
 }
 struct FakeWorker {
     done: Arc<AtomicBool>,
+    crashes: Arc<AtomicBool>,
+    activity: Arc<Mutex<Option<String>>>,
+    denials: Arc<Mutex<Vec<String>>>,
     limit: Arc<Mutex<Option<LimitHit>>>,
     messages: Arc<Mutex<Vec<String>>>,
     stops: Arc<AtomicUsize>,
@@ -41,10 +50,19 @@ impl Worker for FakeWorker {
     }
     fn poll(&mut self) -> WorkerState {
         if self.done.load(Ordering::SeqCst) {
-            WorkerState::Exited { success: true, limit: self.limit.lock().unwrap().take() }
+            WorkerState::Exited {
+                success: !self.crashes.load(Ordering::SeqCst),
+                limit: self.limit.lock().unwrap().take(),
+            }
         } else {
             WorkerState::Running
         }
+    }
+    fn activity(&mut self) -> Option<String> {
+        self.activity.lock().unwrap().clone()
+    }
+    fn take_denials(&mut self) -> Vec<String> {
+        std::mem::take(&mut *self.denials.lock().unwrap())
     }
     fn stop(&mut self) {
         self.stops.fetch_add(1, Ordering::SeqCst);
@@ -55,6 +73,9 @@ impl Worker for FakeWorker {
 impl Runner for FakeRunner {
     fn name(&self) -> &str {
         "fake"
+    }
+    fn checkout(&self) -> Option<PathBuf> {
+        self.checkout.clone()
     }
     fn start(&self, launch: &Launch) -> std::io::Result<Box<dyn Worker>> {
         self.launches
@@ -84,6 +105,9 @@ impl Runner for FakeRunner {
         });
         Ok(Box::new(FakeWorker {
             done,
+            crashes: Arc::clone(&self.crashes),
+            activity: Arc::clone(&self.activity),
+            denials: Arc::clone(&self.denials),
             limit: Arc::clone(&self.limit_next),
             messages: Arc::clone(&self.messages),
             stops: Arc::clone(&self.stops),
@@ -101,6 +125,10 @@ struct Harness {
     max_running: Arc<AtomicUsize>,
     launches: Arc<Mutex<Vec<(String, bool, String)>>>,
     limit_next: Arc<Mutex<Option<LimitHit>>>,
+    crashes: Arc<AtomicBool>,
+    activity: Arc<Mutex<Option<String>>>,
+    denials: Arc<Mutex<Vec<String>>>,
+    checkout: Mutex<Option<PathBuf>>,
     messages: Arc<Mutex<Vec<String>>>,
     stops: Arc<AtomicUsize>,
     notices: Arc<Mutex<Vec<(String, String)>>>,
@@ -133,6 +161,10 @@ impl Harness {
             max_running: Arc::new(AtomicUsize::new(0)),
             launches: Arc::new(Mutex::new(Vec::new())),
             limit_next: Arc::new(Mutex::new(None)),
+            crashes: Arc::new(AtomicBool::new(false)),
+            activity: Arc::new(Mutex::new(None)),
+            denials: Arc::new(Mutex::new(Vec::new())),
+            checkout: Mutex::new(None),
             messages: Arc::new(Mutex::new(Vec::new())),
             stops: Arc::new(AtomicUsize::new(0)),
             notices: Arc::new(Mutex::new(Vec::new())),
@@ -177,6 +209,10 @@ impl Harness {
             max_running: Arc::clone(&self.max_running),
             launches: Arc::clone(&self.launches),
             limit_next: Arc::clone(&self.limit_next),
+            crashes: Arc::clone(&self.crashes),
+            activity: Arc::clone(&self.activity),
+            denials: Arc::clone(&self.denials),
+            checkout: self.checkout.lock().unwrap().clone(),
             messages: Arc::clone(&self.messages),
             stops: Arc::clone(&self.stops),
         };
@@ -289,7 +325,18 @@ fn paused_board_dispatches_nothing_until_resumed() {
 fn a_worker_that_keeps_exiting_unfinished_is_retried_then_detached_with_a_note() {
     let h = Harness::new();
     let key = h.card("Broken");
-    let handle = h.start(1, 2, |_, _| {}); // exits at once without pausing or finishing
+    // Exits at once without pausing or finishing; no fresh worker is tried afterwards.
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            max_failures: 2,
+            max_reclaims: 0,
+            idle_wait: Duration::from_millis(40),
+            ..Options::default()
+        },
+        |_, _| {},
+    );
     h.wait("session detached", |s| {
         s.list_task_sessions(&h.board).unwrap().as_array().unwrap().is_empty()
             && s.poll_events(0, 1000).unwrap()["events"]
@@ -419,6 +466,7 @@ fn a_limit_without_a_reset_time_uses_the_fallback_backoff() {
 #[test]
 fn repeated_instant_failures_stop_dispatch_instead_of_walking_the_backlog() {
     let h = Harness::new();
+    h.crashes.store(true, Ordering::SeqCst);
     for i in 0..5 {
         h.card(&format!("Card {i}"));
     }
@@ -440,6 +488,32 @@ fn repeated_instant_failures_stop_dispatch_instead_of_walking_the_backlog() {
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(h.launches.lock().unwrap().len(), 3, "kept launching after the guard tripped");
     assert!(!h.event_types().contains(&"task_session_detached".to_owned()));
+    h.finish(handle);
+}
+
+#[test]
+fn clean_exits_without_finishing_do_not_trip_the_board_wide_guard() {
+    let h = Harness::new();
+    for i in 0..4 {
+        h.card(&format!("Card {i}"));
+    }
+    // Workers end their turn cleanly without finishing or pausing, instantly. That is a
+    // per-card problem (each card is detached after max_failures), not a broken setup.
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            max_failures: 2,
+            idle_wait: Duration::from_millis(40),
+            max_fast_failures: 3,
+            ..Options::default()
+        },
+        |_, _| {},
+    );
+    h.wait("every card detached", |_| {
+        h.event_types().iter().filter(|t| *t == "task_session_detached").count() == 4
+    });
+    assert_eq!(h.store.orchestrator_status(&h.board).unwrap()["backing_off"], false);
     h.finish(handle);
 }
 
@@ -562,6 +636,134 @@ fn workers_are_told_whether_they_get_a_worktree() {
     assert!(prompt(&code).contains("merge --ff-only"), "workers integrate themselves: {}", prompt(&code));
     assert!(!prompt(&code).contains("--review-required"), "review is opt-in, not the default");
     assert!(prompt(&code).contains("Write and Edit tools"));
+    assert!(prompt(&code).contains("Do not raise a question for a mechanical blocker"));
+    assert!(prompt(&code).contains("--for-integration"), "a merge train can land the work later");
+    assert!(!prompt(&code).contains("--for-review"), "review is off unless the board turns it on");
     assert!(prompt(&research).contains("investigative"), "{}", prompt(&research));
     assert!(!prompt(&research).contains("own git worktree"));
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn repo_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("workyard-orch-repo-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q", "-b", "trunk"]);
+    dir
+}
+
+#[test]
+fn prompts_name_the_real_paths_and_mention_review_only_when_the_board_wants_it() {
+    let h = Harness::new();
+    let repo = repo_dir();
+    *h.checkout.lock().unwrap() = Some(repo.clone());
+    let first = h.card("First");
+    let handle = h.start(1, 3, finish_card);
+    h.wait("done", |s| h.done_count(s) == 1);
+    h.finish(handle);
+    let prompt = h.launches.lock().unwrap().iter().find(|l| l.0 == first).unwrap().2.clone();
+    let wt = repo.join(".workyard/worktrees").join(first.to_lowercase());
+    assert!(prompt.contains(&wt.display().to_string()), "{prompt}");
+    assert!(prompt.contains(&format!("workyard/{}", first.to_lowercase())), "{prompt}");
+    assert!(prompt.contains(&format!("git -C {} merge --ff-only", repo.display())), "{prompt}");
+    assert!(prompt.contains("on trunk"), "the main checkout's own branch is the target: {prompt}");
+    assert!(!prompt.contains("--for-review"));
+
+    // The same board with review turned on tells new workers to wait for a human.
+    let h2 = Harness::new();
+    *h2.checkout.lock().unwrap() = Some(repo.clone());
+    h2.store.set_board_review_required("human", &h2.board, true).unwrap();
+    let second = h2.card("Second");
+    let handle = h2.start(1, 3, finish_card);
+    h2.wait("done", |s| h2.done_count(s) == 1);
+    h2.finish(handle);
+    let prompt = h2.launches.lock().unwrap().iter().find(|l| l.0 == second).unwrap().2.clone();
+    assert!(prompt.contains("--for-review"), "{prompt}");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn activity_is_published_on_the_card_and_a_refused_tool_notifies_once() {
+    let h = Harness::new();
+    let key = h.card("Busy");
+    *h.activity.lock().unwrap() = Some("Edit app.mjs (3 tool uses)".into());
+    *h.denials.lock().unwrap() = vec!["npm test requires approval".into()];
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&seen);
+    let handle = h.start(1, 3, move |launch, store| {
+        // Stay alive until the card shows its activity, then finish.
+        wait_until("activity on the card", || {
+            let board = store.view_board(&launch.board_key).unwrap();
+            let text = board.to_string();
+            if text.contains("blocked: npm test requires approval") || text.contains("Edit app.mjs (3 tool uses)") {
+                sink.lock().unwrap().push(text);
+                true
+            } else {
+                false
+            }
+        });
+        finish_card(launch, store);
+    });
+    h.wait("done", |s| h.done_count(s) == 1);
+    h.finish(handle);
+    assert!(!seen.lock().unwrap().is_empty());
+    let refused = h.notices.lock().unwrap().iter().filter(|(t, b)| t.contains("refused") && b.contains(&key)).count();
+    assert_eq!(refused, 1, "one notification per distinct denial");
+    // Once the worker is gone its activity is cleared.
+    let board = h.store.view_board(&h.board).unwrap().to_string();
+    assert!(!board.contains("Edit app.mjs"), "{board}");
+}
+
+#[test]
+fn permissions_are_recorded_on_the_board() {
+    let h = Harness::new();
+    h.card("Any");
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            idle_wait: Duration::from_millis(40),
+            permissions: "safe".into(),
+            ..Options::default()
+        },
+        finish_card,
+    );
+    h.wait("done", |s| h.done_count(s) == 1);
+    assert_eq!(h.store.orchestrator_status(&h.board).unwrap()["permissions"], "safe");
+    h.finish(handle);
+}
+
+#[test]
+fn a_card_whose_session_was_detached_is_handed_to_a_fresh_worker_a_limited_number_of_times() {
+    let h = Harness::new();
+    let key = h.card("Stubborn");
+    // Never finishes: two exits detach the session, a reclaim starts over, twice; then a human.
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            max_failures: 2,
+            max_reclaims: 2,
+            idle_wait: Duration::from_millis(40),
+            ..Options::default()
+        },
+        |_, _| {},
+    );
+    h.wait("a human is asked", |_| {
+        h.notices.lock().unwrap().iter().any(|(t, b)| t.contains("needs you") && b.contains(&key))
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let launches = h.launches.lock().unwrap();
+    let claims = launches.iter().filter(|l| !l.1).count();
+    assert_eq!(claims, 3, "the original claim plus two fresh workers: {launches:?}");
+    assert_eq!(launches.len(), 6, "two launches per attempt, then it stops");
+    drop(launches);
+    let reclaimed = h.event_types().iter().filter(|t| *t == "card_reclaimed").count();
+    assert_eq!(reclaimed, 2);
+    let card = h.store.view_card(&key).unwrap().to_string();
+    assert!(card.contains("fresh worker did no better"), "{card}");
+    h.finish(handle);
 }

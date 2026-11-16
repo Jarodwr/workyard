@@ -62,10 +62,25 @@ pub trait Worker: Send {
     }
     /// Close the worker's input. Safe to call repeatedly.
     fn close_input(&mut self) {}
+    /// A short description of what the worker is doing right now ("Edit app.mjs (12 tools)"),
+    /// derived from the runtime's own output. `None` when the runtime cannot say.
+    fn activity(&mut self) -> Option<String> {
+        None
+    }
+    /// Tool requests the runtime refused since the last call (a permission denial, a blocked
+    /// command), each as a short description. The engine tells a human about new ones.
+    fn take_denials(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 pub trait Runner: Send {
     /// Recorded as the session's runner, and used in worker actor names.
     fn name(&self) -> &str;
     fn start(&self, launch: &Launch) -> std::io::Result<Box<dyn Worker>>;
+    /// The main checkout workers integrate into, when the runner works inside a repository.
+    /// Worker prompts use it to name real paths and branches.
+    fn checkout(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }

@@ -2,7 +2,8 @@
 //! the core's `orchestrator_dispatch`, starts and resumes workers through a `Runner`, and
 //! repairs sessions whose worker exited without finishing or pausing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::notify::{Notifier, Silent};
 use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState, Workspace};
+use crate::worktree::{branch_for, current_branch, worktree_path};
 
 pub struct Options {
     pub holder: String,
@@ -32,6 +34,13 @@ pub struct Options {
     /// Consecutive fast failures (across all cards) that stop dispatch for a while.
     pub max_fast_failures: u32,
     pub fast_failure_backoff: Duration,
+    /// Times a card whose session was detached after repeated failures is handed back to the
+    /// backlog for a fresh worker (per card, per run) before a human is asked instead.
+    pub max_reclaims: u32,
+    /// Least time between activity updates published for one card.
+    pub activity_interval: Duration,
+    /// `full` or `safe`: how much workers may do without asking. Recorded on the board.
+    pub permissions: String,
 }
 
 impl Default for Options {
@@ -47,6 +56,9 @@ impl Default for Options {
             fast_failure_window: Duration::from_secs(20),
             max_fast_failures: 3,
             fast_failure_backoff: Duration::from_secs(10 * 60),
+            max_reclaims: 2,
+            activity_interval: Duration::from_secs(2),
+            permissions: "full".into(),
         }
     }
 }
@@ -75,6 +87,11 @@ pub struct Orchestrator<'a> {
     /// Last board event this orchestrator has processed; persisted on the board so a restart
     /// neither repeats nor misses notifications and messages.
     cursor: i64,
+    /// The activity text last published per card, and when.
+    published: HashMap<String, (String, Instant)>,
+    /// Denials already announced, so each distinct one notifies once.
+    denials_seen: HashSet<String>,
+    reclaims: HashMap<String, u32>,
 }
 
 struct Live {
@@ -96,6 +113,9 @@ impl<'a> Orchestrator<'a> {
             notifier: Box::new(Silent),
             board_id: String::new(),
             cursor: 0,
+            published: HashMap::new(),
+            denials_seen: HashSet::new(),
+            reclaims: HashMap::new(),
         }
     }
 
@@ -118,6 +138,10 @@ impl<'a> Orchestrator<'a> {
         )?;
         let actor = lease["actor"].as_str().unwrap_or_default().to_owned();
         self.board_id = lease["board_id"].as_str().unwrap_or_default().to_owned();
+        self.log_err(
+            self.store.orchestrator_set_permissions(&actor, &self.board, &self.opts.permissions),
+            &self.board,
+        );
         // The first run on a board starts from now rather than replaying its whole history.
         self.cursor = lease["cursor"].as_i64().unwrap_or(0);
         if self.cursor == 0 {
@@ -142,6 +166,7 @@ impl<'a> Orchestrator<'a> {
                 last_heartbeat = Instant::now();
             }
             self.pump_events(actor)?;
+            self.publish_activity(actor);
             for live in self.live.values_mut() {
                 if live.worker.idle() {
                     live.worker.close_input();
@@ -177,8 +202,8 @@ impl<'a> Orchestrator<'a> {
     fn reap(&mut self, actor: &str) {
         let mut exited = Vec::new();
         for (key, live) in self.live.iter_mut() {
-            if let WorkerState::Exited { limit, .. } = live.worker.poll() {
-                exited.push((key.clone(), live.started.elapsed(), limit));
+            if let WorkerState::Exited { success, limit } = live.worker.poll() {
+                exited.push((key.clone(), live.started.elapsed(), success, limit));
             }
         }
         if exited.is_empty() {
@@ -188,8 +213,9 @@ impl<'a> Orchestrator<'a> {
             .store
             .list_task_sessions(&self.board)
             .unwrap_or_else(|_| json!([]));
-        for (key, ran_for, limit) in exited {
+        for (key, ran_for, success, limit) in exited {
             self.live.remove(&key);
+            self.set_activity(actor, &key, "");
             let session = sessions
                 .as_array()
                 .into_iter()
@@ -204,7 +230,10 @@ impl<'a> Orchestrator<'a> {
                 }
             } else if unpaused {
                 self.limit_streak = 0;
-                if ran_for < self.opts.fast_failure_window {
+                // Only a worker that died (non-zero exit) quickly points at something broken.
+                // One that ended its turn cleanly without finishing is that card's problem
+                // (counted per card below), not a reason to stop the whole board.
+                if !success && ran_for < self.opts.fast_failure_window {
                     self.fast_failure(actor);
                 } else {
                     self.fast_failures = 0;
@@ -277,18 +306,29 @@ impl<'a> Orchestrator<'a> {
         let count = *count;
         if count >= self.opts.max_failures {
             self.failures.remove(key);
-            self.notifier.notify("Workyard: a card needs you", &format!("{key}: the worker {why} {count} times"));
             self.log_err(self.store.detach_task_session(actor, key), key);
-            self.log_err(
-                self.store.add_card_note(
-                    actor,
-                    key,
-                    &format!(
-                        "The worker {why} {count} times, so its session was detached. A human should review this card."
+            let reclaims = self.reclaims.entry(key.to_owned()).or_insert(0);
+            if *reclaims < self.opts.max_reclaims {
+                *reclaims += 1;
+                let attempt = *reclaims;
+                // Hand the card back so the next dispatch starts a fresh worker on it; its
+                // branch and worktree are reused, so nothing the old worker did is lost.
+                let reason = format!("the worker {why} {count} times; starting again with a fresh worker (attempt {attempt})");
+                self.log_err(self.store.add_card_note(actor, key, &format!("Workyard: {reason}.")), key);
+                self.log_err(self.store.orchestrator_reclaim(actor, &self.board, key, &reason), key);
+            } else {
+                self.notifier.notify("Workyard: a card needs you", &format!("{key}: the worker {why} {count} times"));
+                self.log_err(
+                    self.store.add_card_note(
+                        actor,
+                        key,
+                        &format!(
+                            "The worker {why} {count} times, and a fresh worker did no better, so its session was detached. A human should review this card."
+                        ),
                     ),
-                ),
-                key,
-            );
+                    key,
+                );
+            }
         } else {
             self.log_err(self.store.pause_task_session(actor, key, None), key);
         }
@@ -310,7 +350,7 @@ impl<'a> Orchestrator<'a> {
                 Some("claim") => {
                     let key = next["card"]["key"].as_str().unwrap_or_default().to_owned();
                     let workspace = Workspace::from_card(&next["card"]);
-                    let prompt = claim_prompt(&self.board, &key, &worker, workspace);
+                    let prompt = claim_prompt(&self.board, &key, &worker, workspace, &self.prompt_context(&key));
                     self.launch(actor, &key, &worker, &session_id, prompt, false, workspace);
                 }
                 Some("resume") => {
@@ -392,7 +432,7 @@ impl<'a> Orchestrator<'a> {
         if self.store.resume_task_session(actor, &key).is_err() {
             return false; // another dispatcher won, or the wait is no longer resolved
         }
-        let prompt = resume_prompt(&key, &pages);
+        let prompt = resume_prompt(&key, &pages, &self.prompt_context(&key));
         let workspace = Workspace::from_card(card);
         if !self.launch(actor, &key, &owner, &session_id, prompt, true, workspace) {
             return false;
@@ -425,6 +465,60 @@ impl<'a> Orchestrator<'a> {
                 return Ok(());
             }
         }
+    }
+
+    /// Where this card's worker works, for its prompt: real paths when the runner has a
+    /// repository, and whether the board wants human review of commits.
+    fn prompt_context(&self, key: &str) -> PromptContext {
+        let review = self
+            .store
+            .list_boards()
+            .ok()
+            .and_then(|boards| {
+                let list = boards.as_array().cloned().or_else(|| boards["boards"].as_array().cloned())?;
+                list.into_iter().find(|b| b["key"] == self.board.as_str())
+            })
+            .is_some_and(|board| board["review_required"] == true);
+        let main = self.runner.checkout();
+        PromptContext {
+            review,
+            branch: branch_for(key),
+            worktree: main.as_ref().map(|m| worktree_path(m, key)),
+            target: main.as_deref().and_then(current_branch),
+            main,
+        }
+    }
+
+    /// Show each live worker's current activity on its card, only when it changed and no
+    /// more often than `activity_interval`. A refused tool is announced once and shown as
+    /// "blocked" until the worker does something else.
+    fn publish_activity(&mut self, actor: &str) {
+        let mut updates = Vec::new();
+        for (key, live) in self.live.iter_mut() {
+            for denial in live.worker.take_denials() {
+                if self.denials_seen.insert(format!("{key}: {denial}")) {
+                    self.notifier.notify("Workyard: a tool was refused", &format!("{key}: {denial}"));
+                }
+                updates.push((key.clone(), format!("blocked: {denial}"), true));
+            }
+            if let Some(text) = live.worker.activity() {
+                updates.push((key.clone(), text, false));
+            }
+        }
+        for (key, text, urgent) in updates {
+            let due = match self.published.get(&key) {
+                Some((last, at)) => *last != text && (urgent || at.elapsed() >= self.opts.activity_interval),
+                None => true,
+            };
+            if due {
+                self.set_activity(actor, &key, &text);
+            }
+        }
+    }
+
+    fn set_activity(&mut self, actor: &str, key: &str, text: &str) {
+        self.published.insert(key.to_owned(), (text.to_owned(), Instant::now()));
+        self.log_err(self.store.orchestrator_set_activity(actor, &self.board, key, text), key);
     }
 
     fn card_key(&self, card_id: &str) -> Option<String> {
@@ -505,19 +599,63 @@ impl<'a> Orchestrator<'a> {
     }
 }
 
-fn claim_prompt(board: &str, key: &str, actor: &str, workspace: Workspace) -> String {
+/// What a prompt needs to know about where the worker is and what finishing involves.
+struct PromptContext {
+    /// The board wants a human to approve commits before they are merged.
+    review: bool,
+    branch: String,
+    main: Option<PathBuf>,
+    worktree: Option<PathBuf>,
+    /// The branch checked out in the main checkout: where finished work lands.
+    target: Option<String>,
+}
+
+fn integration_steps(key: &str, ctx: &PromptContext) -> String {
+    let main = ctx
+        .main
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "the first entry of `git worktree list`".into());
+    let target = ctx.target.clone().unwrap_or_else(|| "main".into());
+    let branch = &ctx.branch;
+    format!(
+        "Finishing means your work is on {target}. Loop: (1) in your worktree run `git merge {target}` and resolve any conflicts yourself, \
+then run the project's tests; (2) run `git -C {main} merge --ff-only {branch}`; if it refuses because {target} moved meanwhile, go back to (1). \
+Then run `workyard task move {key} Done`; it is refused with `not_integrated` until your branch is on {target}. \
+If the repository documents a merge queue or merge train (CONTRIBUTING, CLAUDE.md, docs/), follow that instead of step (2); if your work lands later, \
+run `workyard orch session pause {key} --for-integration` and stop, and you will be resumed once it is on {target}."
+    )
+}
+
+fn claim_prompt(board: &str, key: &str, actor: &str, workspace: Workspace, ctx: &PromptContext) -> String {
     let place = match workspace {
-        Workspace::Worktree => format!(
-            "You work in your own git worktree on its own branch (see `git branch --show-current`); never touch another checkout. \
-Commit your work there. Once you have commits, record them with `workyard task link-change {key} <repository-id> <your-branch>` \
-(find the repository id with `workyard --json projects` then `workyard --json project <id>`), and run \
-`workyard task update-change <change> <commit>` after each further commit.\n\
-Done means integrated. Before finishing, in your worktree run `git merge main` (resolve any conflicts) and the project's tests. Then merge into the main branch \
-from the main checkout, which is the first entry of `git worktree list`: `git -C <that path> merge --ff-only <your-branch>`. If that fails because main \
-moved, run `git merge main` again and retry. Only then run `workyard task move {key} Done`.\n\
-If a human review is required for this card (a review gate shows on it), do not integrate yet: run `workyard orch session pause {key} --for-review` and stop. \
-You are resumed once it is approved; then integrate as above and finish."
-        ),
+        Workspace::Worktree => {
+            let home = match (&ctx.worktree, &ctx.main) {
+                (Some(worktree), Some(main)) => format!(
+                    "You work in your own git worktree {} on branch {} (already created; your shell starts there). The main checkout is {}; do not edit files in it, only merge into it as described below.",
+                    worktree.display(),
+                    ctx.branch,
+                    main.display()
+                ),
+                _ => format!(
+                    "You work in your own git worktree on its own branch (see `git branch --show-current`); the main checkout is the first entry of `git worktree list`, and you do not edit files in it."
+                ),
+            };
+            let review = if ctx.review {
+                format!(
+                    "\nThis board requires human review of commits: once your work is committed and linked, run `workyard orch session pause {key} --for-review` and stop. \
+You are resumed once a human approves it; only then integrate and finish."
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "{home}\nCommit your work in the worktree. Once you have commits, record them with `workyard task link-change {key} <repository-id> {}` \
+(find the repository id with `workyard --json projects` then `workyard --json project <id>`), and run `workyard task update-change <change> <commit>` after each further commit.{review}\n{}",
+                ctx.branch,
+                integration_steps(key, ctx)
+            )
+        }
         Workspace::None => format!(
             "This card is investigative: do not modify any repository. Report what you find with `workyard task note {key} \"...\"` \
 and keep the status note current."
@@ -527,16 +665,16 @@ and keep the status note current."
         "You are working Workyard card {key} on board {board}. Your actor is {actor} (set in WORKYARD_ACTOR); \
 the card is already claimed by you, In Progress, with this session attached.\n\
 Create and change files with your Write and Edit tools, not shell heredocs: they are more reliable here. Use the `workyard` CLI (the workyard skill describes it). Read the card with `workyard --json card {key}`, \
-do the work, and report with `workyard task progress {key} <0-100> --note \"...\"`.\n\
+do the work, and report honestly with `workyard task progress {key} <0-100> --note \"...\"`: after you have planned, after the main work, after the tests pass; never 100 before the work is integrated.\n\
 {place}\n\
 Messages that arrive while you work are notes a human left on this card; treat them as instructions about it.\n\
-If you need a human decision, raise it with `workyard task ask ... --blocks {key}`, then run \
-`workyard orch session pause {key} --waiting-question <Q-key>` and stop. You will be resumed with the answer.\n\
-When finished (and, for code, integrated), run `workyard task move {key} Done`. Do not work on other cards."
+Do not raise a question for a mechanical blocker: a refused tool or command, a merge conflict you can resolve, a failing test you can fix. Work around it or fix it. \
+Ask only for a real decision that a human has to make: `workyard task ask ... --blocks {key}`, then `workyard orch session pause {key} --waiting-question <Q-key>` and stop. You will be resumed with the answer.\n\
+When finished, run `workyard task move {key} Done`. Do not work on other cards."
     )
 }
 
-fn resume_prompt(key: &str, pages: &[Value]) -> String {
+fn resume_prompt(key: &str, pages: &[Value], ctx: &PromptContext) -> String {
     let events: Vec<&Value> = pages
         .iter()
         .flat_map(|page| page["events"].as_array().into_iter().flatten())
@@ -545,9 +683,11 @@ fn resume_prompt(key: &str, pages: &[Value]) -> String {
         "Resume Workyard card {key}. You paused it earlier; it is In Progress and claimed by you again. \
 Re-read it with `workyard --json card {key}`. These board events happened since you last saw it, \
 including any answer to your question:\n{}\n\
-Continue the work. If you were waiting for review and it is approved, integrate (`git merge main` in your worktree, run the tests, then \
-`git -C <main checkout> merge --ff-only <your-branch>`) and finish with `workyard task move {key} Done`. \
-If you must wait again, pause (`workyard orch session pause {key} --for-review` or `--waiting-question <Q-key>`) and stop.",
-        serde_json::to_string(&events).unwrap_or_default()
+Continue the work. If your work is not on the target branch yet, integrate it first. {}\n\
+If you must wait again, pause (`workyard orch session pause {key} --waiting-question <Q-key>`{} or `--for-integration`) and stop. \
+Do not raise a question for a mechanical blocker; fix it or work around it.",
+        serde_json::to_string(&events).unwrap_or_default(),
+        integration_steps(key, ctx),
+        if ctx.review { ", `--for-review`" } else { "" },
     )
 }

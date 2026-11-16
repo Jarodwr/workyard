@@ -953,6 +953,14 @@ impl Store {
             return Err(Error::new("finish_blocked", "card has unfinished completion requirements")
                 .details(json!({"blockers":before["blockers"],"finish_blockers":before["finish_blockers"],"review_gates":before["review_gates"]})));
         }
+        if to_kind == LaneKind::Done && from_lane != to_lane {
+            let pending = projects::unintegrated_changes(&tx, &id)?;
+            if !pending.is_empty() {
+                return Err(Error::new("not_integrated", "card has changes that are not on their target branch yet")
+                    .hint("Merge the main branch into your branch, run the tests, then fast-forward the target branch to your branch and try again")
+                    .details(json!({"changes":pending})));
+            }
+        }
         let affected = dependents_of(&tx, &id)?;
         let old_states = capture_states(&tx, &affected)?;
         let mut source_ids = ordered_cards(&tx, from_lane)?;
@@ -1654,10 +1662,10 @@ impl Store {
 
 fn migrate(db: &mut Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 14 {
+    if version == 15 {
         return Ok(());
     }
-    if version > 14 {
+    if version > 15 {
         return Err(Error::new(
             "schema_too_new",
             "database was created by a newer Workyard version",
@@ -1810,6 +1818,15 @@ fn migrate(db: &mut Connection) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 14")?;
+        version = 14;
+    }
+    if version == 14 {
+        tx.execute_batch(include_str!("../migrations/015.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (15,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 15")?;
     }
     tx.commit()?;
     Ok(())
@@ -1941,7 +1958,7 @@ fn ensure_work_lane(db: &Connection, lane_id: &str) -> Result<()> {
     }
 }
 fn board_row(db: &Connection, id: &str) -> Result<Value> {
-    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id FROM boards WHERE id=?1", [id], |r| Ok(json!({"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
+    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required FROM boards WHERE id=?1", [id], |r| Ok(json!({"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
 }
 fn card_row(db: &Connection, id: &str) -> Result<Value> {
     Ok(serde_json::to_value(card_snapshot(db, id)?)?)
@@ -2056,6 +2073,9 @@ fn annotate_claim_activity(db: &Connection, card: &mut Value) -> Result<()> {
             "runner": session["runner"],
             "paused": session["paused_at"].is_string(),
             "held_by": session["held_by"],
+            "waiting_integration": session["waiting_integration"],
+            "activity": session_activity(db, session["id"].as_str().unwrap_or_default())?.0,
+            "activity_at": session_activity(db, session["id"].as_str().unwrap_or_default())?.1,
         });
     }
     let lane_kind: String = db.query_row(
@@ -2086,6 +2106,12 @@ fn annotate_claim_activity(db: &Connection, card: &mut Value) -> Result<()> {
         card["stale"] = json!(silent > chrono::Duration::minutes(stale_after_minutes()));
     }
     Ok(())
+}
+fn session_activity(db: &Connection, session_id: &str) -> Result<(String, Option<String>)> {
+    Ok(db
+        .query_row("SELECT activity,activity_at FROM task_sessions WHERE id=?1", [session_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?
+        .unwrap_or_default())
 }
 fn blocking_impact(db: &Connection, id: &str) -> Result<i64> {
     Ok(db.query_row(

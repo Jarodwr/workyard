@@ -2,6 +2,7 @@ pub mod claude;
 pub mod engine;
 pub mod notify;
 pub mod runner;
+pub mod worktree;
 
 pub use claude::ClaudeRunner;
 pub use engine::{Options, Orchestrator, hostname};

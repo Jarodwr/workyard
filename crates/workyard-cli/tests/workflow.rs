@@ -262,3 +262,52 @@ fn cli_orchestrator_lease_pause_dispatch_and_follow() {
     follower.kill().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn cli_review_setting_permissions_and_integration_pause() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("workyard-cli-test-{nonce}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("board.db");
+    let exe = env!("CARGO_BIN_EXE_workyard");
+    let run = |args: &[&str]| -> (bool, Value) {
+        let output = Command::new(exe)
+            .args(["--db", db.to_str().unwrap(), "--actor", "agent:w", "--json"])
+            .args(args)
+            .output()
+            .unwrap();
+        (output.status.success(), serde_json::from_slice(&output.stdout).unwrap())
+    };
+    let ok = |args: &[&str]| -> Value {
+        let (success, value) = run(args);
+        assert!(success, "{value}");
+        value["data"].clone()
+    };
+    let board = ok(&["plan", "create-board", "CLI"]);
+    let key = board["key"].as_str().unwrap();
+    assert_eq!(board["review_required"], false);
+    assert_eq!(ok(&["plan", "board-review", key, "on"])["review_required"], true);
+    assert_eq!(ok(&["plan", "board-review", key, "off"])["review_required"], false);
+    assert_eq!(ok(&["orch", "status", key])["permissions"], "full");
+
+    // Pausing for integration is a real wait kind, and it cannot be combined with another.
+    let card = ok(&["task", "add-card", key, "Work"]);
+    let card_key = card["key"].as_str().unwrap();
+    ok(&["task", "claim", card_key, "--expected-version", "1"]);
+    ok(&["task", "move", card_key, "In Progress"]);
+    ok(&["orch", "session", "attach", card_key, "--runner", "claude", "--session-id", "s-1"]);
+    let (success, error) = run(&["orch", "session", "pause", card_key, "--for-review", "--for-integration"]);
+    assert!(!success);
+    assert_eq!(error["error"]["code"], "validation_error");
+    let paused = ok(&["orch", "session", "pause", card_key, "--for-integration"]);
+    assert_eq!(paused["waiting_integration"], true);
+}
+
+#[test]
+fn cli_permission_flags_become_claude_arguments() {
+    // Run the `--help` text rather than a worker: the contract is that full is the default.
+    let help = Command::new(env!("CARGO_BIN_EXE_workyard")).args(["orch", "run", "--help"]).output().unwrap();
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("--permissions") && text.contains("[default: full]"), "{text}");
+    assert!(text.contains("--allow"), "{text}");
+}

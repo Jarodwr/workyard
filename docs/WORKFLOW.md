@@ -26,7 +26,7 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 ```
 
 - From a terminal it stays in the foreground; Ctrl-C stops the workers, pauses their sessions, and releases the board.
-- Each worker runs `claude -p` in its own git worktree (`.claude/worktrees/<card>`) on its own branch. Investigations (`--workspace none`) run in the repository without a worktree.
+- Each worker runs `claude -p` in its own git worktree (`<repo>/.workyard/worktrees/<card>`, branch `workyard/<card>`) and finishes by merging its own work into the main branch. It is not sandboxed to the worktree, so it can do that merge. Workers run with permission checks off by default (`--permissions full`); pass `--permissions safe` for edits plus an allowlist of commands. Investigations (`--workspace none`) run in the repository without a worktree.
 - Only one orchestrator can hold a board; a second `orch run` is refused and names the holder.
 - macOS notifications tell you when a question needs an answer, a commit needs review, a card needs a human, or the board is waiting on a usage limit. Add `--no-notify` to silence them.
 
@@ -35,7 +35,7 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 | You want to | Do this |
 |---|---|
 | Answer a question | Open it in the phase graph or the stakeholder view and pick an option. The worker resumes with your answer. |
-| Approve code | Card → Code changes → **Approve this commit**. A card with a review gate cannot reach Done without it. |
+| Approve code | Card → Code changes → **Approve this commit**. A card with a review gate cannot reach Done without it. Review is off by default; `workyard plan board-review <board> on` turns it on for new changes. |
 | Tell a worker something | Add a note on its card. It reaches the running worker within moments (at its next tool step), or its next briefing if it is paused. |
 | Pause new work | **Pause** in the board's orchestrator bar (or `workyard orch pause B-1`). Running workers continue; **Drain** also stops starting anything while they finish. **Resume** to carry on. |
 | Edit the plan safely | Pause, edit, resume. |
@@ -45,7 +45,7 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 
 ## What it does by itself
 
-- **Retries.** A worker that exits unfinished is resumed; after three failures its session is detached with a note and you are notified.
+- **Retries.** A worker that exits unfinished is resumed; after three failures its session is detached with a note and the card goes back to the backlog for a fresh worker (up to twice); after that you are notified. A card cannot reach Done until its branch is on the target branch.
 - **Usage limits.** When Claude reports a limit, the board stops starting and resuming work until it resets, shows "Waiting until …" in the orchestrator bar, and carries on afterwards. Interrupted cards resume rather than restart.
 - **Instant failures.** Three workers in a row dying within seconds (bad auth, permissions, a flag) pause dispatch for ten minutes instead of failing the whole backlog. Check the logs.
 - **Stale claims.** A claim whose owner has been silent for 15 minutes is flagged *Stale* on the card, unless its session is paused or an orchestrator is watching it.

@@ -12,8 +12,10 @@
 //! is how a human's note reaches a worker without restarting it. The process stays alive after
 //! a turn until stdin closes, so the engine closes it once the worker is idle.
 //!
-//! Workspace: a card that needs a worktree runs with `--worktree <card-key>`, which creates
-//! `.claude/worktrees/<key>` on its own branch and reuses it when the session is resumed.
+//! Workspace: a card that needs a worktree runs in `<repo>/.workyard/worktrees/<key>` on branch
+//! `workyard/<key>`, created by Workyard (see `worktree`) and reused when the session resumes.
+//! The runtime is deliberately not given `--worktree`: its isolation would stop the worker
+//! merging into the main checkout, which is part of finishing a card.
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -26,6 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState, Workspace};
+use crate::worktree::ensure_worktree;
 
 pub struct ClaudeRunner {
     pub bin: String,
@@ -83,6 +86,105 @@ const IDLE_AFTER: Duration = Duration::from_millis(1500);
 struct Activity {
     last_event: Instant,
     last_was_result: bool,
+    /// What the worker last did, and how many tools it has used this run.
+    doing: String,
+    tools: u32,
+    denials: Vec<String>,
+}
+
+/// What one stream-json line tells us about the worker's current activity.
+#[derive(Debug, PartialEq)]
+pub enum Observed {
+    /// A tool call, described briefly ("Edit app.mjs", "Bash: node --test").
+    Tool(String),
+    Thinking,
+    /// A tool request the runtime refused.
+    Denied(String),
+    /// The worker finished a turn.
+    TurnDone,
+}
+
+const DENIAL_PHRASES: &[&str] = &[
+    "requires approval",
+    "isolated in the worktree",
+    "was blocked",
+    "Contains brace with quote character",
+];
+
+fn clip(text: &str, n: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= n {
+        one_line
+    } else {
+        format!("{}…", one_line.chars().take(n).collect::<String>())
+    }
+}
+
+fn describe_tool(name: &str, input: &Value) -> String {
+    let file = input["file_path"].as_str().or(input["path"].as_str()).map(|p| {
+        std::path::Path::new(p).file_name().and_then(|f| f.to_str()).unwrap_or(p).to_owned()
+    });
+    match name {
+        "Bash" => format!("Bash: {}", clip(input["command"].as_str().unwrap_or(""), 60)),
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => match file {
+            Some(file) => format!("{name} {file}"),
+            None => name.to_owned(),
+        },
+        "Grep" | "Glob" => format!("{name} {}", clip(input["pattern"].as_str().unwrap_or(""), 40)),
+        other => other.to_owned(),
+    }
+}
+
+/// Read one stream-json line for activity. Structured fields only: tool_use blocks in
+/// assistant messages, is_error tool_result blocks in user messages, and the final result.
+pub fn observe(line: &Value) -> Vec<Observed> {
+    let mut seen = Vec::new();
+    match line["type"].as_str().unwrap_or_default() {
+        "assistant" => {
+            for block in line["message"]["content"].as_array().into_iter().flatten() {
+                match block["type"].as_str().unwrap_or_default() {
+                    "tool_use" => seen.push(Observed::Tool(describe_tool(
+                        block["name"].as_str().unwrap_or("tool"),
+                        &block["input"],
+                    ))),
+                    "thinking" | "text" => seen.push(Observed::Thinking),
+                    _ => {}
+                }
+            }
+        }
+        "user" => {
+            for block in line["message"]["content"].as_array().into_iter().flatten() {
+                if block["type"] != "tool_result" || block["is_error"] != true {
+                    continue;
+                }
+                let text = match &block["content"] {
+                    Value::String(s) => s.clone(),
+                    Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
+                    _ => String::new(),
+                };
+                if DENIAL_PHRASES.iter().any(|phrase| text.contains(phrase)) {
+                    seen.push(Observed::Denied(clip(&text, 140)));
+                }
+            }
+        }
+        "result" => seen.push(Observed::TurnDone),
+        _ => {}
+    }
+    seen
+}
+
+fn apply(activity: &mut Activity, seen: Vec<Observed>) {
+    for item in seen {
+        match item {
+            Observed::Tool(text) => {
+                activity.tools += 1;
+                activity.doing = text;
+            }
+            Observed::Thinking => activity.doing = "thinking".into(),
+            Observed::Denied(text) => activity.denials.push(text),
+            Observed::TurnDone => activity.doing = "idle".into(),
+        }
+    }
 }
 
 struct ChildWorker {
@@ -150,6 +252,18 @@ impl Worker for ChildWorker {
     fn close_input(&mut self) {
         self.stdin = None;
     }
+
+    fn activity(&mut self) -> Option<String> {
+        let a = self.activity.lock().ok()?;
+        if a.doing.is_empty() {
+            return None;
+        }
+        Some(if a.tools > 0 { format!("{} ({} tool uses)", a.doing, a.tools) } else { a.doing.clone() })
+    }
+
+    fn take_denials(&mut self) -> Vec<String> {
+        self.activity.lock().map(|mut a| std::mem::take(&mut a.denials)).unwrap_or_default()
+    }
 }
 
 fn write_user_message(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()> {
@@ -164,6 +278,14 @@ fn write_user_message(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()>
 impl Runner for ClaudeRunner {
     fn name(&self) -> &str {
         "claude"
+    }
+
+    fn checkout(&self) -> Option<PathBuf> {
+        let dir = match &self.cwd {
+            Some(dir) => dir.clone(),
+            None => std::env::current_dir().ok()?,
+        };
+        std::fs::canonicalize(dir).ok()
     }
 
     fn start(&self, launch: &Launch) -> std::io::Result<Box<dyn Worker>> {
@@ -181,9 +303,6 @@ impl Runner for ClaudeRunner {
             "stream-json",
             "--verbose",
         ]);
-        if launch.workspace == Workspace::Worktree {
-            command.arg("--worktree").arg(launch.card_key.to_lowercase());
-        }
         command
             .arg(if launch.resume { "--resume" } else { "--session-id" })
             .arg(&launch.session_id)
@@ -203,8 +322,19 @@ impl Runner for ClaudeRunner {
                 command.env("PATH", joined);
             }
         }
-        if let Some(cwd) = &self.cwd {
-            command.current_dir(cwd);
+        match (launch.workspace, &self.cwd) {
+            // The worker's own checkout; the main one stays free for it to merge into.
+            (Workspace::Worktree, cwd) => {
+                let main = match cwd {
+                    Some(dir) => dir.clone(),
+                    None => std::env::current_dir()?,
+                };
+                command.current_dir(ensure_worktree(&main, &launch.card_key)?);
+            }
+            (Workspace::None, Some(cwd)) => {
+                command.current_dir(cwd);
+            }
+            (Workspace::None, None) => {}
         }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout is piped");
@@ -215,6 +345,9 @@ impl Runner for ClaudeRunner {
         let activity = Arc::new(Mutex::new(Activity {
             last_event: Instant::now(),
             last_was_result: false,
+            doing: String::new(),
+            tools: 0,
+            denials: Vec::new(),
         }));
         {
             let (limit, done, activity) = (Arc::clone(&limit), Arc::clone(&reader_done), Arc::clone(&activity));
@@ -225,6 +358,9 @@ impl Runner for ClaudeRunner {
                     if let Ok(mut a) = activity.lock() {
                         a.last_event = Instant::now();
                         a.last_was_result = parsed.as_ref().is_some_and(|v| v["type"] == "result");
+                        if let Some(v) = &parsed {
+                            apply(&mut a, observe(v));
+                        }
                     }
                     if let Some(hit) = parsed.as_ref().and_then(limit_signal) {
                         if let Ok(mut slot) = limit.lock() {
@@ -281,6 +417,32 @@ mod tests {
         }
         // Other API errors are faults, not limits.
         assert_eq!(limit_signal(&json!({"type":"result","api_error_status":500})), None);
+    }
+
+    #[test]
+    fn tool_calls_become_short_descriptions() {
+        let edit = json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/repo/src/app.mjs"}}]}});
+        assert_eq!(observe(&edit), vec![Observed::Tool("Edit app.mjs".into())]);
+        let bash = json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"node --test"}}]}});
+        assert_eq!(observe(&bash), vec![Observed::Tool("Bash: node --test".into())]);
+        let text = json!({"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}});
+        assert_eq!(observe(&text), vec![Observed::Thinking]);
+        assert_eq!(observe(&json!({"type":"result","subtype":"success"})), vec![Observed::TurnDone]);
+        let mut a = Activity { last_event: Instant::now(), last_was_result: false, doing: String::new(), tools: 0, denials: vec![] };
+        apply(&mut a, observe(&edit));
+        apply(&mut a, observe(&bash));
+        assert_eq!((a.doing.as_str(), a.tools), ("Bash: node --test", 2));
+    }
+
+    #[test]
+    fn refused_tools_are_recognised_from_error_results_only() {
+        let denied = json!({"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"Claude requested permissions to use Bash, but you haven't granted it yet. This command requires approval"}]}});
+        assert!(matches!(observe(&denied).as_slice(), [Observed::Denied(t)] if t.contains("requires approval")));
+        let blocked = json!({"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"This session is isolated in the worktree"}]}]}});
+        assert!(matches!(observe(&blocked).as_slice(), [Observed::Denied(_)]));
+        // The same words in a successful result (a file that mentions them) are not a denial.
+        let fine = json!({"type":"user","message":{"content":[{"type":"tool_result","content":"the docs say it requires approval"}]}});
+        assert!(observe(&fine).is_empty());
     }
 
     #[test]

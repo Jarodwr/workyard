@@ -10,7 +10,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 
 use super::{
-    Error, Result, Store, check_board_active, now, record, require_nonblank, resolve_board,
+    Error, Result, Store, card_row, check_board_active, now, record, require_nonblank, resolve_board,
+    resolve_card,
 };
 
 pub const DEFAULT_LEASE_SECONDS: i64 = 30;
@@ -95,7 +96,7 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
     let key: String = db.query_row("SELECT key FROM boards WHERE id=?1", [board_id], |r| r.get(0))?;
     let row = db
         .query_row(
-            "SELECT desired_state,cursor,pool_size,holder,host,pid,epoch,heartbeat_at,lease_expires_at,backoff_until,backoff_reason FROM orchestrator_sessions WHERE board_id=?1",
+            "SELECT desired_state,cursor,pool_size,holder,host,pid,epoch,heartbeat_at,lease_expires_at,backoff_until,backoff_reason,permissions FROM orchestrator_sessions WHERE board_id=?1",
             [board_id],
             |r| {
                 Ok(json!({
@@ -106,12 +107,13 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
                     "lease_expires_at": r.get::<_, Option<String>>(8)?,
                     "backoff_until": r.get::<_, Option<String>>(9)?,
                     "backoff_reason": r.get::<_, String>(10)?,
+                    "permissions": r.get::<_, String>(11)?,
                 }))
             },
         )
         .optional()?
         .unwrap_or_else(|| {
-            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"backoff_until":null,"backoff_reason":""})
+            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"backoff_until":null,"backoff_reason":"","permissions":"full"})
         });
     let mut row = row;
     let epoch = row["epoch"].as_i64().unwrap_or(0);
@@ -321,6 +323,76 @@ impl Store {
         record(&tx, actor, "orchestrator_backoff_changed", &board_id, "orchestrator", &board_id, Some(&before), Some(&after), &[], why)?;
         self.commit(tx)?;
         Ok(after)
+    }
+
+    /// Record how much workers may do without asking (`full` or `safe`), so the desktop can
+    /// show it and a restart keeps it.
+    pub fn orchestrator_set_permissions(&self, actor: &str, board: &str, permissions: &str) -> Result<Value> {
+        if !["full", "safe"].contains(&permissions) {
+            return Err(Error::new("validation_error", "permissions must be full or safe"));
+        }
+        let epoch = epoch_of(actor)?;
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_epoch(&tx, &board_id, epoch)?;
+        let before = session_row(&tx, &board_id)?;
+        if before["permissions"] == permissions {
+            return Ok(before);
+        }
+        tx.execute(
+            "UPDATE orchestrator_sessions SET permissions=?2,updated_at=?3 WHERE board_id=?1",
+            params![board_id, permissions, now()],
+        )?;
+        let after = session_row(&tx, &board_id)?;
+        record(&tx, actor, "orchestrator_permissions_changed", &board_id, "orchestrator", &board_id, Some(&before), Some(&after), &[], "")?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
+    /// Publish what a worker is doing right now. Not an event (it changes constantly), but it
+    /// ticks the file so a desktop refreshes. A no-op when the text is unchanged.
+    pub fn orchestrator_set_activity(&self, actor: &str, board: &str, card: &str, text: &str) -> Result<()> {
+        let epoch = epoch_of(actor)?;
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_epoch(&tx, &board_id, epoch)?;
+        let card_id = resolve_card(&tx, card)?;
+        let text: String = text.chars().take(200).collect();
+        let changed = tx.execute(
+            "UPDATE task_sessions SET activity=?2,activity_at=?3 WHERE card_id=?1 AND detached_at IS NULL AND activity!=?2",
+            params![card_id, text, now()],
+        )?;
+        if changed == 0 {
+            return Ok(());
+        }
+        self.commit(tx)
+    }
+
+    /// Give a card whose session was detached after repeated failures back to the backlog so
+    /// the next dispatch claims it fresh. Its branch and worktree stay and are reused.
+    pub fn orchestrator_reclaim(&self, actor: &str, board: &str, card: &str, reason: &str) -> Result<Value> {
+        let epoch = epoch_of(actor)?;
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_epoch(&tx, &board_id, epoch)?;
+        let card_id = resolve_card(&tx, card)?;
+        let before = card_row(&tx, &card_id)?;
+        if before["board_id"] != board_id.as_str() || before["owner_actor"].is_null() {
+            return Err(Error::new("validation_error", "card is not claimed on this board"));
+        }
+        tx.execute(
+            "UPDATE cards SET owner_actor=NULL,updated_at=?2,version=version+1 WHERE id=?1",
+            params![card_id, now()],
+        )?;
+        crate::sessions::detach_for_card(&tx, &card_id)?;
+        let unowned = card_row(&tx, &card_id)?;
+        let moved = Store::move_card_tx(&tx, actor, card, "Backlog", None, unowned["version"].as_i64())?;
+        record(&tx, actor, "card_reclaimed", &board_id, "card", &card_id, Some(&before), Some(&moved), &[], reason)?;
+        self.commit(tx)?;
+        Ok(moved)
     }
 
     pub fn orchestrator_set_pool(&self, actor: &str, board: &str, size: i64) -> Result<Value> {

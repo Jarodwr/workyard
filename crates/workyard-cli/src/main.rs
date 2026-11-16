@@ -220,8 +220,12 @@ enum TaskCommand {
         target: Option<String>,
         #[arg(long, default_value = "")]
         commit: String,
-        #[arg(long)]
+        /// Require human approval of this change (the default follows the board's setting)
+        #[arg(long, conflicts_with = "no_review")]
         review_required: bool,
+        /// Do not require approval even if the board does
+        #[arg(long)]
+        no_review: bool,
         #[arg(long)]
         expected_version: i64,
     },
@@ -242,6 +246,21 @@ enum TaskCommand {
     },
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ReviewSetting {
+    On,
+    Off,
+}
+
+/// How much workers may do without asking.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Permissions {
+    /// Permission checks off: workers run anything. For local projects you trust.
+    Full,
+    /// Edits and an allowlist of commands only; anything else is denied.
+    Safe,
+}
+
 #[derive(Subcommand)]
 enum PlanCommand {
     CreateProject {
@@ -253,6 +272,13 @@ enum PlanCommand {
         name: String,
         #[arg(long, default_value = "")]
         description: String,
+    },
+    /// Turn human review of commits on or off for a board (off by default). Changes linked
+    /// afterwards need approval in the desktop when it is on.
+    BoardReview {
+        board: String,
+        /// `on` or `off`
+        setting: ReviewSetting,
     },
     AttachBoard {
         board: String,
@@ -321,9 +347,16 @@ enum OrchCommand {
         /// Claude Code binary used to run workers headless
         #[arg(long, default_value = "claude")]
         claude_bin: String,
-        /// Extra argument for every worker (repeatable); replaces the defaults when given
+        /// Extra argument for every worker (repeatable); replaces the permission defaults when given
         #[arg(long = "claude-arg", allow_hyphen_values = true)]
         claude_args: Vec<String>,
+        /// How much workers may do without asking: `full` turns permission checks off (the
+        /// default, for local projects), `safe` allows edits and an allowlist of commands
+        #[arg(long, value_enum, default_value = "full")]
+        permissions: Permissions,
+        /// With `--permissions safe`, one more allowed tool pattern, for example `Bash(make:*)`
+        #[arg(long = "allow")]
+        allow: Vec<String>,
         /// Directory workers run in, usually the project's repository
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -498,6 +531,9 @@ enum SessionCommand {
         /// Wait until a human approves your commit (and any finish dependency is met)
         #[arg(long)]
         for_review: bool,
+        /// Wait until your changes are on their target branch (someone else merges them)
+        #[arg(long)]
+        for_integration: bool,
     },
     Resume { card: String },
     /// Take the session over (for example in a terminal). It stays paused and is never offered
@@ -695,6 +731,7 @@ fn run_task(store: &Store, actor: &str, command: TaskCommand) -> workyard_core::
             target,
             commit,
             review_required,
+            no_review,
             expected_version,
         } => store.link_card_change(
             actor,
@@ -703,7 +740,7 @@ fn run_task(store: &Store, actor: &str, command: TaskCommand) -> workyard_core::
             &branch,
             target.as_deref(),
             &commit,
-            review_required,
+            if review_required { Some(true) } else if no_review { Some(false) } else { None },
             expected_version,
         )?,
         TaskCommand::UpdateChange {
@@ -733,6 +770,9 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
         }
         PlanCommand::CreateBoard { name, description } => {
             store.create_board(actor, &name, &description)?
+        }
+        PlanCommand::BoardReview { board, setting } => {
+            store.set_board_review_required(actor, &board, matches!(setting, ReviewSetting::On))?
         }
         PlanCommand::AttachBoard {
             board,
@@ -800,10 +840,12 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             pool,
             claude_bin,
             claude_args,
+            permissions,
+            allow,
             cwd,
             max_failures,
             no_notify,
-        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, cwd, max_failures, !no_notify)?,
+        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, cwd, max_failures, !no_notify)?,
         OrchCommand::Status { board } => store.orchestrator_status(&board)?,
         OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
         OrchCommand::Resume { board } => store.orchestrator_set_state(actor, &board, "running")?,
@@ -850,7 +892,9 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
         } => store.release_card(actor, &card, expected_version, Some(&reason))?,
         OrchCommand::Session { command } => match command {
             SessionCommand::Attach { card, runner, session_id } => store.attach_task_session(actor, &card, &runner, &session_id)?,
-            SessionCommand::Pause { card, waiting_question, for_review } => store.pause_task_session_for(actor, &card, waiting_question.as_deref(), for_review)?,
+            SessionCommand::Pause { card, waiting_question, for_review, for_integration } => {
+                store.pause_task_session_waiting(actor, &card, waiting_question.as_deref(), for_review, for_integration)?
+            }
             SessionCommand::Resume { card } => store.resume_task_session(actor, &card)?,
             SessionCommand::Hold { card, by } => store.hold_task_session(actor, &card, &by)?,
             SessionCommand::ReleaseHold { card } => store.release_task_session_hold(actor, &card)?,
@@ -901,12 +945,23 @@ fn run_admin(store: &Store, actor: &str, command: AdminCommand) -> workyard_core
     })
 }
 
-/// Claude Code arguments for headless workers. Workers may run the `workyard` CLI and edit
-/// files; anything else needs the user to pass their own `--claude-arg` set.
-fn default_claude_args() -> Vec<String> {
-    ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(workyard:*)"]
-        .map(String::from)
-        .to_vec()
+/// Tools workers may use in `safe` mode besides editing files.
+const SAFE_COMMANDS: &[&str] = &[
+    "workyard", "git", "node", "npm", "npx", "pnpm", "yarn", "ls", "cat", "mkdir", "pwd", "cargo", "python3",
+];
+
+/// Claude Code arguments for headless workers. `full` turns permission checks off; `safe`
+/// allows file edits and an allowlist of commands, plus whatever `--allow` adds.
+fn permission_args(permissions: Permissions, allow: &[String]) -> Vec<String> {
+    match permissions {
+        Permissions::Full => vec!["--dangerously-skip-permissions".into()],
+        Permissions::Safe => {
+            let mut args: Vec<String> = vec!["--permission-mode".into(), "acceptEdits".into(), "--allowedTools".into()];
+            args.extend(SAFE_COMMANDS.iter().map(|c| format!("Bash({c}:*)")));
+            args.extend(allow.iter().cloned());
+            args
+        }
+    }
 }
 
 fn run_orchestrator(
@@ -915,6 +970,8 @@ fn run_orchestrator(
     pool: Option<i64>,
     claude_bin: String,
     claude_args: Vec<String>,
+    permissions: Permissions,
+    allow: Vec<String>,
     cwd: Option<PathBuf>,
     max_failures: u32,
     notify: bool,
@@ -924,7 +981,7 @@ fn run_orchestrator(
     log_dir.push(".logs");
     let runner = ClaudeRunner {
         bin: claude_bin,
-        args: if claude_args.is_empty() { default_claude_args() } else { claude_args },
+        args: if claude_args.is_empty() { permission_args(permissions, &allow) } else { claude_args },
         db,
         cwd,
         log_dir: PathBuf::from(log_dir),
@@ -938,6 +995,10 @@ fn run_orchestrator(
         holder: format!("cli:{}", std::process::id()),
         pool,
         max_failures,
+        permissions: match permissions {
+            Permissions::Full => "full".into(),
+            Permissions::Safe => "safe".into(),
+        },
         ..Options::default()
     };
     eprintln!("Orchestrating {board}. Press Ctrl-C to stop; workers are paused and the lease released.");
@@ -1019,5 +1080,21 @@ fn exit_code(error: &Error) -> i32 {
     match error.code.as_str() {
         "version_conflict" | "ownership_conflict" => 3,
         _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_permissions_turn_checks_off_and_safe_ones_allow_a_list() {
+        assert_eq!(permission_args(Permissions::Full, &["Bash(make:*)".into()]), vec!["--dangerously-skip-permissions"]);
+        let safe = permission_args(Permissions::Safe, &["Bash(make:*)".into()]);
+        assert_eq!(&safe[..3], ["--permission-mode", "acceptEdits", "--allowedTools"]);
+        for tool in ["Bash(workyard:*)", "Bash(git:*)", "Bash(npm:*)", "Bash(cargo:*)", "Bash(python3:*)", "Bash(make:*)"] {
+            assert!(safe.iter().any(|a| a == tool), "{tool} missing from {safe:?}");
+        }
+        assert!(!safe.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path};
 
 use crate::{
-    Error, Result, Store, card_row, check_board_active, check_version, guard_card, now,
+    Error, Result, Store, board_row, card_row, check_board_active, check_version, guard_card, now,
     question_row, record, require_nonblank, resolve_board, resolve_card, resolve_question, uuid,
 };
 
@@ -369,10 +369,11 @@ impl Store {
         branch: &str,
         target: Option<&str>,
         commit: &str,
-        review_required: bool,
+        review_required: impl Into<Option<bool>>,
         expected: i64,
     ) -> Result<Value> {
         require_nonblank("branch", branch)?;
+        let review_required: Option<bool> = review_required.into();
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let card_id = resolve_card(&tx, card)?;
@@ -401,6 +402,11 @@ impl Store {
         }
         let target = target.unwrap_or(&default_target);
         require_nonblank("target branch", target)?;
+        // Unless the caller says otherwise, the board decides whether this change needs review.
+        let review_required = match review_required {
+            Some(required) => required,
+            None => tx.query_row("SELECT review_required FROM boards WHERE id=?1", [board_id], |r| r.get::<_, i64>(0))? != 0,
+        };
         let id = uuid();
         tx.execute("INSERT INTO card_changes(id,card_id,repository_id,working_branch,target_branch,commit_oid,review_required,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![id,card_id,repository,branch.trim(),target.trim(),commit.trim(),review_required,now()])?;
         tx.execute(
@@ -577,6 +583,90 @@ impl Store {
             &effects,
             "",
         )?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+}
+
+/// Run `git -C <repo> <args>`; `Err` carries why it could not run, `Ok` the exit code.
+fn git_status(repo: &str, args: &[&str]) -> std::result::Result<(i32, String), String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git could not run: {e}"))?;
+    Ok((
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+    ))
+}
+
+/// Changes of a card whose branch tip (or recorded commit, if the branch is gone) is not yet
+/// an ancestor of the repository's target branch. Empty means the card is integrated.
+pub(crate) fn unintegrated_changes(db: &Connection, card_id: &str) -> Result<Vec<Value>> {
+    let mut stmt = db.prepare("SELECT c.id,c.working_branch,c.target_branch,c.commit_oid,r.path FROM card_changes c JOIN project_repositories r ON r.id=c.repository_id WHERE c.card_id=?1 ORDER BY c.created_at,c.id")?;
+    let rows = stmt
+        .query_map([card_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut pending = Vec::new();
+    for (change, branch, target, commit, path) in rows {
+        let reason = if !std::path::Path::new(&path).is_dir() {
+            Some(format!("repository {path} is not readable"))
+        } else {
+            integration_problem(&path, &branch, &target, &commit)
+        };
+        if let Some(reason) = reason {
+            pending.push(json!({"change":change,"branch":branch,"target_branch":target,"reason":reason}));
+        }
+    }
+    Ok(pending)
+}
+
+fn integration_problem(repo: &str, branch: &str, target: &str, commit: &str) -> Option<String> {
+    let verify = |name: &str| -> std::result::Result<Option<String>, String> {
+        let (code, out) = git_status(repo, &["rev-parse", "--verify", "-q", &format!("{name}^{{commit}}")])?;
+        Ok((code == 0 && !out.is_empty()).then_some(out))
+    };
+    let tip = match verify(&format!("refs/heads/{branch}")) {
+        Ok(Some(tip)) => tip,
+        Ok(None) if !commit.is_empty() => commit.to_owned(),
+        Ok(None) => return Some(format!("branch {branch} does not exist and no commit is recorded")),
+        Err(e) => return Some(e),
+    };
+    match verify(&format!("refs/heads/{target}")) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Some(format!("target branch {target} does not exist in {repo}")),
+        Err(e) => return Some(e),
+    }
+    match git_status(repo, &["merge-base", "--is-ancestor", &tip, &format!("refs/heads/{target}")]) {
+        Ok((0, _)) => None,
+        Ok((1, _)) => Some(format!("{} is not on {target} yet", &tip[..tip.len().min(8)])),
+        Ok((code, _)) => Some(format!("git could not compare {branch} with {target} (exit {code})")),
+        Err(e) => Some(e),
+    }
+}
+
+impl Store {
+    /// Turn human review of commits on or off for a board. New changes linked afterwards
+    /// default to it; existing changes keep their own setting.
+    pub fn set_board_review_required(&self, actor: &str, board: &str, required: bool) -> Result<Value> {
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_board_active(&tx, &board_id)?;
+        let before = board_row(&tx, &board_id)?;
+        if before["review_required"] == required {
+            return Ok(before);
+        }
+        tx.execute(
+            "UPDATE boards SET review_required=?2,version=version+1 WHERE id=?1",
+            params![board_id, required],
+        )?;
+        let after = board_row(&tx, &board_id)?;
+        record(&tx, actor, "board_review_changed", &board_id, "board", &board_id, Some(&before), Some(&after), &[], "")?;
         self.commit(tx)?;
         Ok(after)
     }
