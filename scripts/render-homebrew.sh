@@ -44,7 +44,8 @@ unsigned_note='  caveats <<~EOS
     or right-click the app and choose Open.
 
     The app carries its own copy of the workyard CLI, so it works on its own.
-    To use `workyard` in a terminal, install the formula too:
+    The desktop executable is linked as `workyard-app`. To use `workyard` in a terminal,
+    install the formula too:
       brew install workyard
 
     To use the Claude Code plugin that ships inside the app:
