@@ -10,3 +10,4 @@
 .DS_Store
 /app/src-tauri/binaries/
 /app/src-tauri/gen/schemas/
+/dist/
