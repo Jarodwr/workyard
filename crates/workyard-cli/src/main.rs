@@ -374,6 +374,10 @@ enum OrchCommand {
         /// Do not send desktop notifications
         #[arg(long)]
         no_notify: bool,
+        /// Keep each card's worktree and branch after it is Done and merged (they are removed
+        /// by default)
+        #[arg(long)]
+        keep_worktrees: bool,
     },
     /// Show the board's orchestrator: state, cursor, pool size, and lease.
     Status { board: String },
@@ -893,7 +897,8 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             cwd,
             max_failures,
             no_notify,
-        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, supervisor, plugin_dir, cwd, max_failures, !no_notify)?,
+            keep_worktrees,
+        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, supervisor, plugin_dir, cwd, max_failures, !no_notify, keep_worktrees)?,
         OrchCommand::Status { board } => store.orchestrator_status(&board)?,
         OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
         OrchCommand::Resume { board } => store.orchestrator_set_state(actor, &board, "running")?,
@@ -1074,6 +1079,7 @@ fn run_orchestrator(
     cwd: Option<PathBuf>,
     max_failures: u32,
     notify: bool,
+    keep_worktrees: bool,
 ) -> workyard_core::Result<Value> {
     let db = store.path().to_path_buf();
     let mut log_dir = db.clone().into_os_string();
@@ -1109,6 +1115,7 @@ fn run_orchestrator(
             Permissions::Safe => "safe".into(),
         },
         supervisor,
+        keep_worktrees,
         ..Options::default()
     };
     eprintln!("Orchestrating {board}. Press Ctrl-C to stop; workers are paused and the lease released.");

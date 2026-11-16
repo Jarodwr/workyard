@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::notify::{Notifier, Silent};
 use crate::runner::{LimitHit, Launch, PermissionAnswer, PermissionAsk, Runner, Worker, WorkerState, Workspace};
-use crate::worktree::{branch_for, current_branch, worktree_path};
+use crate::worktree::{branch_for, current_branch, remove_merged, worktree_path};
 
 pub struct Options {
     pub holder: String,
@@ -44,6 +44,8 @@ pub struct Options {
     /// Run a long-lived supervisor agent that is told what needs judgement (stuck workers,
     /// questions, failures) and acts through the `workyard` CLI. Costs tokens, so off by default.
     pub supervisor: bool,
+    /// Leave a finished card's worktree and branch in place instead of removing them.
+    pub keep_worktrees: bool,
 }
 
 impl Default for Options {
@@ -63,6 +65,7 @@ impl Default for Options {
             activity_interval: Duration::from_secs(2),
             permissions: "full".into(),
             supervisor: false,
+            keep_worktrees: false,
         }
     }
 }
@@ -102,6 +105,8 @@ pub struct Orchestrator<'a> {
     /// Denials already announced, so each distinct one notifies once.
     denials_seen: HashSet<String>,
     reclaims: HashMap<String, u32>,
+    /// Cards moved to Done whose worktree and branch are still to be removed.
+    cleanup: HashSet<String>,
 }
 
 struct Live {
@@ -130,6 +135,7 @@ impl<'a> Orchestrator<'a> {
             published: HashMap::new(),
             denials_seen: HashSet::new(),
             reclaims: HashMap::new(),
+            cleanup: HashSet::new(),
         }
     }
 
@@ -189,6 +195,7 @@ impl<'a> Orchestrator<'a> {
                 }
             }
             self.reap(actor);
+            self.remove_finished_worktrees();
             self.supervise();
             let status = self.store.orchestrator_status(&self.board)?;
             if status["desired_state"] == "running" {
@@ -613,6 +620,54 @@ impl<'a> Orchestrator<'a> {
         self.store.read_card(card_id).ok().map(|card| card.key)
     }
 
+    fn in_done_lane(&self, lane_id: &str) -> bool {
+        let Ok(board) = self.store.view_board(&self.board) else { return false };
+        board["lanes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|lane| lane["id"] == lane_id && lane["kind"] == "done")
+    }
+
+    /// Remove the worktree and branch of cards that are Done. It waits for the card's worker
+    /// to exit, and never touches a held session, a dirty worktree, or a branch that is not
+    /// on the main checkout's branch (`remove_merged` refuses those); what it removes or
+    /// leaves is logged.
+    fn remove_finished_worktrees(&mut self) {
+        if self.cleanup.is_empty() {
+            return;
+        }
+        let Some(main) = self.runner.checkout() else {
+            self.cleanup.clear();
+            return;
+        };
+        let held: HashSet<String> = self
+            .store
+            .list_task_sessions(&self.board)
+            .ok()
+            .and_then(|sessions| sessions.as_array().cloned())
+            .into_iter()
+            .flatten()
+            .filter(|entry| !entry["session"]["held_by"].is_null())
+            .filter_map(|entry| entry["card_key"].as_str().map(str::to_owned))
+            .collect();
+        for key in self.cleanup.clone() {
+            if self.live.contains_key(&key) || held.contains(&key) {
+                continue; // try again once the worker is gone or the hold is released
+            }
+            self.cleanup.remove(&key);
+            let done = self.store.read_card(&key).is_ok_and(|card| self.in_done_lane(&card.lane_id.to_string()));
+            if !done {
+                continue; // moved back out of Done meanwhile
+            }
+            match remove_merged(&main, &key) {
+                Ok(Some(what)) => eprintln!("{key}: removed {what}"),
+                Ok(None) => {}
+                Err(error) => eprintln!("{key}: kept its worktree and branch: {error}"),
+            }
+        }
+    }
+
     fn stop_worker(&mut self, actor: &str, key: &str) {
         if let Some(mut live) = self.live.remove(key) {
             live.worker.stop();
@@ -663,6 +718,13 @@ impl<'a> Orchestrator<'a> {
             "card_cancelled" | "card_force_released" | "card_transferred" => {
                 if let Some(key) = self.card_key(entity) {
                     self.stop_worker(actor, &key);
+                }
+            }
+            "card_moved" => {
+                if !self.opts.keep_worktrees && self.in_done_lane(after["lane_id"].as_str().unwrap_or_default()) {
+                    if let Some(key) = after["key"].as_str() {
+                        self.cleanup.insert(key.to_owned());
+                    }
                 }
             }
             "permission_decided" => self.answer_permission(after),

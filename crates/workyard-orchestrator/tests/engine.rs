@@ -888,3 +888,61 @@ fn a_card_whose_session_was_detached_is_handed_to_a_fresh_worker_a_limited_numbe
     assert!(card.contains("fresh worker did no better"), "{card}");
     h.finish(handle);
 }
+
+/// A worker that commits in its own worktree, merges into the main checkout and finishes.
+fn merge_and_finish(repo: PathBuf) -> impl Fn(&Launch, &Store) + Send + Sync + 'static {
+    move |launch, store| {
+        let wt = workyard_orchestrator::worktree::ensure_worktree(&repo, &launch.card_key).unwrap();
+        std::fs::write(wt.join("work.txt"), "work").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["-c", "user.email=t@example.invalid", "-c", "user.name=T", "commit", "-q", "-m", "work"]);
+        git(&repo, &["merge", "--ff-only", &format!("workyard/{}", launch.card_key.to_lowercase())]);
+        finish_card(launch, store);
+    }
+}
+
+fn repo_with_commit() -> PathBuf {
+    let repo = repo_dir();
+    git(&repo, &["-c", "user.email=t@example.invalid", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "first"]);
+    repo
+}
+
+#[test]
+fn a_done_and_merged_cards_worktree_and_branch_are_removed() {
+    let h = Harness::new();
+    let repo = repo_with_commit();
+    *h.checkout.lock().unwrap() = Some(repo.clone());
+    let key = h.card("Cleanup");
+    let handle = h.start(1, 3, merge_and_finish(repo.clone()));
+    let wt = repo.join(".workyard/worktrees").join(key.to_lowercase());
+    h.wait("done", |s| h.done_count(s) == 1);
+    wait_until("the worktree to be removed", || !wt.exists());
+    h.finish(handle);
+    let branches = std::process::Command::new("git").arg("-C").arg(&repo).args(["branch", "--list", "workyard/*"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty(), "branch should be deleted");
+    assert!(repo.join("work.txt").exists(), "the merged work stays on trunk");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn keep_worktrees_leaves_them_in_place() {
+    let h = Harness::new();
+    let repo = repo_with_commit();
+    *h.checkout.lock().unwrap() = Some(repo.clone());
+    let key = h.card("Keep");
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            idle_wait: Duration::from_millis(40),
+            keep_worktrees: true,
+            ..Options::default()
+        },
+        merge_and_finish(repo.clone()),
+    );
+    h.wait("done", |s| h.done_count(s) == 1);
+    std::thread::sleep(Duration::from_millis(500));
+    h.finish(handle);
+    assert!(repo.join(".workyard/worktrees").join(key.to_lowercase()).exists());
+    let _ = std::fs::remove_dir_all(&repo);
+}
