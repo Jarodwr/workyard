@@ -15,20 +15,23 @@ release dmg instead. Keep this file up to date whenever either changes.
 
 ## What the formula does
 
-- `cargo install --locked` of `crates/workyard-cli`, the only binary needed.
+- `cargo install` (`--locked` comes from `std_cargo_args`) of `crates/workyard-cli`, the only binary needed.
 - Installs the plugin directory to `share/workyard/plugin`. The CLI looks for
   it at `<exe dir>/../share/workyard/plugin` after resolving the `bin/workyard`
   symlink, so `workyard doctor` reports the plugin as found.
 - `caveats` print the `claude plugin marketplace add` steps and `workyard doctor`.
 - `test` checks `workyard --version` and `workyard doctor --json`. `doctor`
-  exits 1 when `claude` or `git` is missing, so the test accepts 0 or 1 and
-  checks the reported version and the installed plugin manifest instead.
+  exits 1 when `claude` or `git` is missing, so the test puts stub `claude` and
+  `git` scripts on `PATH`, then checks the reported version and that the
+  plugin manifest was installed.
 
 ## The cask
 
 `brew install --cask jarodwr/tap/workyard` installs `Workyard.app` and links the
 bundled CLI as `workyard`. It conflicts in practice with the formula (same
-binary name); install one of them.
+binary name); install one of them. The cask is Apple silicon only: `scripts/release.sh --app`
+builds one dmg for the host architecture. For Intel, build a second dmg on an Intel Mac and switch
+the cask to `arch` and `sha256 arm: ..., intel: ...`.
 
 @CASK_NOTE@
 

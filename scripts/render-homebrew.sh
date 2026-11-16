@@ -62,12 +62,12 @@ render() {
 
 render packaging/homebrew/workyard.rb.tmpl > "$out/Formula/workyard.rb"
 render packaging/homebrew/workyard-app.rb.tmpl |
-  awk -v dmg="$dmg_line" -v note="$unsigned_note" '
-    /@DMG_SHA256@/ { print dmg; next }
-    /^@UNSIGNED_NOTE@$/ { print note; next }
+  DMG_LINE="$dmg_line" NOTE="$unsigned_note" awk '
+    /@DMG_SHA256@/ { print ENVIRON["DMG_LINE"]; next }
+    /^@UNSIGNED_NOTE@$/ { print ENVIRON["NOTE"]; next }
     { print }' > "$out/Casks/workyard.rb"
 render packaging/homebrew/workyard.md.tmpl |
-  awk -v note="$cask_note" '/^@CASK_NOTE@$/ { print note; next } { print }' > "$out/docs/workyard.md"
+  NOTE="$cask_note" awk '/^@CASK_NOTE@$/ { print ENVIRON["NOTE"]; next } { print }' > "$out/docs/workyard.md"
 
 if grep -rn '@[A-Z_]*@' "$out"; then echo "unfilled placeholder in $out" >&2; exit 1; fi
 

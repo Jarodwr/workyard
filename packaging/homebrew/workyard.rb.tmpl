@@ -9,9 +9,9 @@ class Workyard < Formula
   depends_on "rust" => :build
 
   def install
-    system "cargo", "install", "--locked", *std_cargo_args(path: "crates/workyard-cli")
-    # The CLI finds its Claude plugin at <prefix>/share/workyard/plugin
-    (share/"workyard").install "plugin"
+    system "cargo", "install", *std_cargo_args(path: "crates/workyard-cli")
+    # The CLI finds its Claude plugin at <prefix>/share/workyard/plugin (`pkgshare`)
+    pkgshare.install "plugin"
   end
 
   def caveats
@@ -28,11 +28,16 @@ class Workyard < Formula
   test do
     assert_match "workyard #{version}", shell_output("#{bin}/workyard --version")
 
-    # `doctor` exits 1 when `claude` or `git` is not on PATH, which can
-    # happen in the test sandbox; the JSON report is printed either way.
+    # `doctor` fails when `claude` or `git` is missing from PATH, as in the
+    # test sandbox; stub both so the report is deterministic.
+    %w[claude git].each do |tool|
+      (testpath/"stubs"/tool).write "#!/bin/sh\necho \"#{tool} 0.0.0\"\n"
+      (testpath/"stubs"/tool).chmod 0755
+    end
+    ENV.prepend_path "PATH", testpath/"stubs"
     ENV["WORKYARD_DB"] = testpath/"workyard.db"
-    report = JSON.parse(shell_output("#{bin}/workyard doctor --json", [0, 1]))
+    report = JSON.parse(shell_output("#{bin}/workyard doctor --json"))
     assert_equal version.to_s, report.dig("data", "version")
-    assert_path_exists share/"workyard/plugin/.claude-plugin/plugin.json"
+    assert_path_exists pkgshare/"plugin/.claude-plugin/plugin.json"
   end
 end
