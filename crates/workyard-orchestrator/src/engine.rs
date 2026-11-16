@@ -516,7 +516,7 @@ impl<'a> Orchestrator<'a> {
         if self.store.resume_task_session(actor, &key).is_err() {
             return false; // another dispatcher won, or the wait is no longer resolved
         }
-        let prompt = resume_prompt(&key, &pages, &self.prompt_context(&key));
+        let prompt = resume_prompt(&self.board, &key, &pages, &self.prompt_context(&key));
         let workspace = Workspace::from_card(card);
         if !self.launch(actor, &key, &owner, &session_id, prompt, true, workspace) {
             return false;
@@ -918,6 +918,21 @@ run `workyard orch session pause {key} --for-integration` and stop, and you will
     )
 }
 
+/// Side discoveries and questions: the two things workers have not done unprompted.
+fn worker_guidance(board: &str, key: &str) -> String {
+    format!(
+        "Side discoveries: when you find a bug, a missing piece or a follow-up outside this card, do not fix it silently and do not ignore it. \
+Add a Backlog card with `workyard task add-card {board} \"Title\" --desc \"what, where, why\"`, order it with `workyard task depend` if it must come before or after something, \
+and add one line to your own card's note linking it (`workyard task note {key} \"found C-N: ...\"`). Add at most 3 new cards per card, and never start them.\n\
+Questions: asking is normal here. When the card leaves a real choice open (scope, user-visible behaviour or naming, a trade-off, anything the card's author would want to weigh in on), \
+ask with a recommendation instead of guessing: `workyard --json task ask {board} \"Title\" --kind engineering|business --option \"A\" --option \"B\" --recommend \"A\" --why \"reason\" --blocks {key}`, \
+then `workyard orch session pause {key} --waiting-question <Q-key>` and stop; you are resumed with the answer. \
+Example: title \"Should archived boards still show in the board picker?\", options \"Hide them\" / \"Show them dimmed\" / \"Behind a toggle\", recommend \"Behind a toggle\", \
+why \"it keeps the picker short without making archived work unreachable, and the toggle is cheap to build\". Give 2-4 real options, one recommendation and a one-line reason. \
+Do not raise a question for a mechanical blocker: a refused tool or command, a merge conflict you can resolve, a failing test you can fix. Fix it or work around it."
+    )
+}
+
 fn claim_prompt(board: &str, key: &str, actor: &str, workspace: Workspace, ctx: &PromptContext) -> String {
     let place = match workspace {
         Workspace::Worktree => {
@@ -959,13 +974,13 @@ Create and change files with your Write and Edit tools, not shell heredocs: they
 do the work, and report honestly with `workyard task progress {key} <0-100> --note \"...\"`: after you have planned, after the main work, after the tests pass; never 100 before the work is integrated.\n\
 {place}\n\
 Messages that arrive while you work are notes a human left on this card; treat them as instructions about it.\n\
-Do not raise a question for a mechanical blocker: a refused tool or command, a merge conflict you can resolve, a failing test you can fix. Work around it or fix it. \
-Ask only for a real decision that a human has to make: `workyard task ask ... --blocks {key}`, then `workyard orch session pause {key} --waiting-question <Q-key>` and stop. You will be resumed with the answer.\n\
-When finished, run `workyard task move {key} Done`. Do not work on other cards."
+{}\n\
+When finished, run `workyard task move {key} Done`. Do not work on other cards.",
+        worker_guidance(board, key)
     )
 }
 
-fn resume_prompt(key: &str, pages: &[Value], ctx: &PromptContext) -> String {
+fn resume_prompt(board: &str, key: &str, pages: &[Value], ctx: &PromptContext) -> String {
     let events: Vec<&Value> = pages
         .iter()
         .flat_map(|page| page["events"].as_array().into_iter().flatten())
@@ -975,11 +990,11 @@ fn resume_prompt(key: &str, pages: &[Value], ctx: &PromptContext) -> String {
 Re-read it with `workyard --json card {key}`. These board events happened since you last saw it, \
 including any answer to your question:\n{}\n\
 Continue the work. If your work is not on the target branch yet, integrate it first. {}\n\
-If you must wait again, pause (`workyard orch session pause {key} --waiting-question <Q-key>`{} or `--for-integration`; flags combine, and you resume only once every one holds) and stop. \
-Do not raise a question for a mechanical blocker; fix it or work around it.",
+If you must wait again, pause (`workyard orch session pause {key} --waiting-question <Q-key>`{} or `--for-integration`; flags combine, and you resume only once every one holds) and stop.\n{}",
         serde_json::to_string(&events).unwrap_or_default(),
         integration_steps(key, ctx),
         if ctx.review { ", `--for-review`" } else { "" },
+        worker_guidance(board, key),
     )
 }
 
@@ -1024,5 +1039,20 @@ mod integration_prompt_tests {
         let rebase = integration_steps("C-1", &ctx(true));
         assert!(rebase.contains("git rebase main") && !rebase.contains("git merge main"));
         assert!(rebase.contains("--ff-only") && rebase.contains("not_integrated"));
+    }
+
+    #[test]
+    fn prompts_carry_add_card_rule_and_ask_guidance() {
+        let claim = claim_prompt("B-1", "C-1", "agent:x", Workspace::Worktree, &ctx(false));
+        let resume = resume_prompt("B-1", "C-1", &[], &ctx(false));
+        for prompt in [&claim, &resume] {
+            assert!(prompt.contains("workyard task add-card B-1"));
+            assert!(prompt.contains("at most 3 new cards") || prompt.contains("At most 3 new cards") || prompt.contains("Add at most 3 new cards"));
+            assert!(prompt.contains("task depend"));
+            assert!(prompt.contains("ask with a recommendation instead of guessing"));
+            assert!(prompt.contains("--recommend"));
+            assert!(prompt.contains("Do not raise a question for a mechanical blocker"));
+            assert!(prompt.contains("Behind a toggle"));
+        }
     }
 }
