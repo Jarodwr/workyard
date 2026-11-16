@@ -80,6 +80,7 @@ The Rust core exposes typed `Card` and `Question` snapshots, distinct board/card
 | `boards` | `id` UUID, `key`, `name`, `description`, `created_at`, `archived` boolean, `version` |
 | `lanes` | `id` UUID, `board_id` FK, `name`, `position`, `kind` (`backlog`, `active`, `done`; legacy `review`/`custom` values remain readable for migration), `archived` boolean, `version`; unique active name within a board |
 | `cards` | `id` UUID, `key`, `board_id` FK, `lane_id` FK, `position`, `title`, `description`, legacy `priority` (`P0`–`P3`, retained for database and core API compatibility; ignored by the CLI and scheduling), `progress` integer 0–100, `status_note`, `agent_type` free text, `owner_actor` nullable, `created_at`, `updated_at`, `version` |
+| `card_reports` | `card_id` PK/FK, `board_id` FK, `body` markdown (max 256 KB), `actor`, `version` (starts at 1, +1 per replacement), `updated_at`; one report per card, replaced whole |
 | `card_notes` | `id` UUID, `board_id` FK, `card_id` FK, `actor`, `body`, `created_at`; append-only comments separate from agent-owned card fields |
 | `task_sessions` | `id` UUID, `card_id` FK, owner actor, runner, external session ID, attach/pause/detach times, optional waiting question FK, and last delivered event ID; at most one attached session per task |
 | `questions` | `id` UUID, `key`, `board_id` FK, `kind` (`engineering`, `business`), `title`, `body`, `options_json` (2–10 distinct substantive choices plus `Other`), `recommended_option` (one of the choices), `recommendation_reason` (plain-language, at most 280 characters), `status` (`open`, `answered`, `dropped`), selected `answer`, optional `answer_note`, `owner`, `created_at`, `answered_at`, `version` |
@@ -156,6 +157,7 @@ Board updates use the board's expected version. The three work lanes have fixed 
 | `update_card` | Card, expected version, title/description/agent type patch |
 | `move_card` | Card, destination lane, optional position, expected version |
 | `update_progress` | Card, 0–100, optional note, expected version |
+| `set_card_report` | Card, nonblank markdown body of at most 256 KB (`validation_error` beyond); replaces the card's report, bumps the report version, emits one `card_report_set` event (size, not body); no card version or ownership required |
 | `add_card_note` | Card, nonblank body; no expected version or card ownership required |
 | `attach_task_session`, `pause_task_session`, `resume_task_session`, `acknowledge_task_session`, `detach_task_session` | Manage an attached agent session and its delivered-event cursor without changing the card version. Pausing may name a question whose resolution wakes the agent even when other blockers remain. Only a claimed In Progress task can attach, pause, resume, or acknowledge a session. Completing, cancelling, releasing, transferring, or moving a task back to Backlog detaches its session. |
 | `add_dependency` | From card, exactly one target card/question, expected source-card version |
@@ -236,7 +238,7 @@ workyard next <B-1> [--agent-type T] | history <B-1|C-1> | events --since N
 
 # task: a worker agent on a card
 workyard task claim|release <C-1>          workyard task move <C-1> <lane>
-workyard task progress <C-1> 40 [--note]   workyard task note <C-1> "text"
+workyard task progress <C-1> 40 [--note]   workyard task note <C-1> "text"   workyard task report <C-1> [--file report.md | stdin]
 workyard task update <C-1> [--title|--desc|--agent-type]
 workyard task add-card <B-1> "Title" [--phase P]
 workyard task depend|undepend <C-1> --on <C-2|Q-3> [--scope start|finish]

@@ -1,5 +1,5 @@
 /** Which tab the card detail modal opens on, and which tabs carry an attention badge. */
-export const CARD_TABS = ["overview", "activity", "history", "code", "links"] as const;
+export const CARD_TABS = ["overview", "activity", "history", "code", "links", "report"] as const;
 export type CardTab = (typeof CARD_TABS)[number];
 
 export type TabBadge = { kind: "count" | "dot"; count: number; label: string };
