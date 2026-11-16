@@ -639,6 +639,15 @@ enum PhaseCommand {
         #[arg(long)]
         expected_version: i64,
     },
+    /// Rename a phase. Every new board starts with one default phase: rename it to your first
+    /// real phase instead of leaving it empty beside a new one.
+    Rename {
+        board: String,
+        phase: String,
+        name: String,
+        #[arg(long)]
+        expected_version: i64,
+    },
     /// Deprecated: phases complete automatically when their last card is Done. Does nothing.
     Complete {
         board: String,
@@ -993,6 +1002,7 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
             PhaseCommand::List { board } => store.list_phases(&board)?,
             PhaseCommand::Add { board, name, description } => store.add_phase_with_description(actor, &board, &name, &description)?,
             PhaseCommand::Describe { board, phase, description, expected_version } => store.describe_phase(actor, &board, &phase, &description, expected_version)?,
+            PhaseCommand::Rename { board, phase, name, expected_version } => store.rename_phase(actor, &board, &phase, &name, expected_version)?,
             PhaseCommand::Complete { .. } | PhaseCommand::Advance { .. } => {
                 let message = "phases complete automatically when their last card is Done; this command is deprecated and does nothing";
                 eprintln!("{message}");

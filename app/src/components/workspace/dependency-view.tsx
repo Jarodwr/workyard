@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadViewState, pickZoom, saveViewState } from "@/lib/view-state";
+import { phasesWithWork } from "@/lib/phases";
 import {
   ArrowUpRight, Bot, Check, GitFork, Link2,
   LockKeyhole, Minus, Plus, X, CircleHelp,
@@ -50,7 +51,7 @@ export function DependencyView({
   const [answerNote, setAnswerNote] = useState("");
   const graphScrollRef = useRef<HTMLDivElement>(null);
   const cards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
-  const visiblePhases = board.phases.filter((phase) => showCompleted || phase.status !== "complete");
+  const visiblePhases = phasesWithWork(board, questions).filter((phase) => showCompleted || phase.status !== "complete");
   // The board is re-read on every wake so session activity shows live, but edges only change
   // when a card does (adding or removing a dependency bumps its version), so only then reload them.
   const cardSignature = useMemo(() => cards.map((card) => `${card.id}:${card.version}`).join(","), [cards]);

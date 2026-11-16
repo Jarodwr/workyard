@@ -195,7 +195,7 @@ impl Store {
             );
         }
         let phase_id = uuid();
-        tx.execute("INSERT INTO phases(id,board_id,name,position,created_at) VALUES (?1,?2,'Current work',0,?3)",params![phase_id,id,now])?;
+        tx.execute("INSERT INTO phases(id,board_id,name,position,created_at) VALUES (?1,?2,'Phase 1',0,?3)",params![phase_id,id,now])?;
         lane_effects.push(json!({"type":"phase_created","phase_id":phase_id,"after":phases::phase_row(&tx,&phase_id)?}));
         let after = board_row(&tx, &id)?;
         record(

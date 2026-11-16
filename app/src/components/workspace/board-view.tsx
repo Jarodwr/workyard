@@ -1,3 +1,4 @@
+import { phasesWithWork } from "@/lib/phases";
 import { useEffect, useState } from "react";
 import { loadViewState, pickPhaseFilter, saveViewState } from "@/lib/view-state";
 import {
@@ -102,7 +103,7 @@ export function BoardView({
   useEffect(() => {
     saveViewState(scope, { phaseFilter, showCompleted });
   }, [scope, phaseFilter, showCompleted]);
-  const visiblePhases = board.phases.filter((item) => showCompleted || item.status !== "complete");
+  const visiblePhases = phasesWithWork(board, questions).filter((item) => showCompleted || item.status !== "complete");
   const completedCount = board.phases.filter((item) => item.status === "complete").length;
   const graphControls = (
     <>

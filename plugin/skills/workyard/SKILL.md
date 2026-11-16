@@ -7,6 +7,40 @@ description: Use when assigned a Workyard card (a key like C-12) or asked to wor
 
 Workyard is a local kanban shared with humans. Use the `workyard` CLI with `--json`. Your actor is `$WORKYARD_ACTOR`; do not change it, because card ownership is checked against it. Never edit the database directly.
 
+## How Workyard works (read this once)
+
+- **People and agents share one board.** A project holds boards; a board has phases (delivery order), three lanes (Backlog, In Progress, Done), cards and questions. A human reviews in the desktop; they cannot see your terminal, only what you write to the board: progress, notes, questions, reports, linked changes. If it is not on the board, the human does not know it.
+- **You are one worker on one card.** A script (the orchestrator) claims the card for you, runs you in your own git worktree, and may stop and resume you. You may be stopped at any point, so keep the card's progress and note honest as you go; a resume starts from what the board says plus a briefing of events since you left.
+- **Pausing is how you wait.** You never sit and wait for a human. You record why you are waiting (`orch session pause`), then stop. The orchestrator frees the slot and resumes you when the wait condition holds: a question answered or dropped, a thread message to reply to, a review approved, your branch integrated.
+- **A question is a decision that belongs to a human.** It has a kind (`engineering` for technical trade-offs, `business` for product, scope, naming and priorities), 2-10 options (`Other` is added automatically), your recommendation and a one-line reason. It blocks the cards named with `--blocks`. It stays open until a human answers or drops it. Only humans resolve questions; you and the supervisor never do.
+- **A question can be a conversation.** The human may write in the question's thread instead of choosing. You are resumed for that turn only: answer in the thread, adjust the options if warranted, pause again. The same question stays open.
+- **Cards are small and independent.** Do your own card only. Anything else you find becomes a Backlog card, never your own side work.
+
+## When to ask a question (and when not to)
+
+Asking is normal and wanted here. A wrong guess costs a human far more than a question does, and a human answers in seconds. Ask when ANY of these is true:
+
+- The card or its docs allow two or more reasonable behaviours a user would notice (what is shown, what is hidden, defaults, limits, error wording, naming of a command, flag, file or concept).
+- You are choosing between designs with different costs (a new dependency, a schema or file-format change, a public interface, a rewrite versus an extension) and the card does not settle it.
+- The card is ambiguous, contradicts the repository's docs or ADRs, or its done-criteria cannot be met as written.
+- You would be removing, renaming or changing behaviour that other work or users depend on.
+- Something affects scope: it would roughly double the work, or leave out something the card seems to promise.
+- Priority, policy or money is involved (the human or a stakeholder owns it: use `--kind business`).
+
+Do NOT ask about: a refused tool or command, a merge conflict you can resolve, a failing test you can fix, which of several equivalent implementation details to pick inside your own files, or anything the card, an ADR or the repository's CLAUDE.md already decides. Fix or decide those and note the decision in `task note`.
+
+**Ask early.** Ask before you build on a guess, not after. If you can finish unrelated parts of the card first, do that, then ask; do not do work that depends on the answer. When a question needs asking, raise it, pause, and stop: do not keep going on your recommended option as if it were answered.
+
+**Write a good question.** The human reads it cold, on a phone-sized card, with no context from your session.
+- Title: the decision as a question, specific ("Should archived boards still appear in the board picker?"), not a topic ("Board picker").
+- `--body`: two or three sentences of what you found, where in the repo, and what is at stake. Include a file path or card key where it helps.
+- Options: 2-4 real, distinct, complete choices, each one a short phrase a human can pick without reading your body. Not "Yes/No" unless it truly is. Do not include `Other`.
+- `--recommend`: one of your options; always have a view. `--why`: one plain-language line (at most 280 characters) with the reason, not a restatement.
+- `--blocks`: every card that cannot proceed correctly without the answer, including your own (`--blocks C-12`). Pick `--kind` honestly.
+- One decision per question. Two decisions are two questions.
+
+**After you pause.** You are resumed by one of: an answer (the selected option plus an optional explanation arrive in your briefing; if they chose `Other`, the explanation is the instruction), a drop (the human decided the question no longer matters: carry on with the card's own wording or your note), or a thread message (see Question threads). Read the answer literally, record in `task note` what you decided because of it, and continue.
+
 ## Loop
 
 1. Read the card: `workyard --json card C-12`. Note its `version`, blockers, notes, and phase.

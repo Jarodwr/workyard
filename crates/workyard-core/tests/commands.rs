@@ -471,7 +471,7 @@ fn later_phase_work_is_offered_after_current_but_never_before() {
             .create_card_in_phase("agent", &board, title, "", "P2", None, "", phase)
             .unwrap()
     };
-    let current = mk("Current task", Some("Current work"));
+    let current = mk("Current task", Some("Phase 1"));
     let third = mk("Third task", Some("Third"));
     let second = mk("Second task", Some("Second"));
     assert_eq!(store.orchestrator_status(&board).unwrap()["held_back_by_phase"], 0);
@@ -639,12 +639,12 @@ fn cancelled_prerequisite_stops_blocking_and_stays_visible() {
 fn phase_description_and_derived_completion() {
     let (_dir, store, board) = setup();
     let described = store
-        .describe_phase("agent", &board, "Current work", "Build the command foundation", 1)
+        .describe_phase("agent", &board, "Phase 1", "Build the command foundation", 1)
         .unwrap();
     assert_eq!(described["description"], "Build the command foundation");
     assert_eq!(described["version"], 2);
     assert_eq!(
-        store.describe_phase("agent", &board, "Current work", "Stale update", 1)
+        store.describe_phase("agent", &board, "Phase 1", "Stale update", 1)
             .unwrap_err().code,
         "version_conflict"
     );
@@ -662,15 +662,15 @@ fn phase_description_and_derived_completion() {
     let events = store.poll_events(before, 10).unwrap();
     let effects = events["events"][0]["effects"].as_array().unwrap();
     let done = effects.iter().find(|e| e["type"] == "phase_completed").unwrap();
-    assert_eq!((done["phase"].as_str(), done["current_phase"].as_str()), (Some("Current work"), Some("Next")));
+    assert_eq!((done["phase"].as_str(), done["current_phase"].as_str()), (Some("Phase 1"), Some("Next")));
     // Work added to the complete phase reopens it and moves current back.
     let before = store.latest_event_id().unwrap();
-    store.create_card_in_phase("agent", &board, "Late", "", "P2", None, "", Some("Current work")).unwrap();
+    store.create_card_in_phase("agent", &board, "Late", "", "P2", None, "", Some("Phase 1")).unwrap();
     let phases = store.list_phases(&board).unwrap();
     assert_eq!((phases[0]["status"].as_str(), phases[1]["status"].as_str()), (Some("current"), Some("future")));
     let events = store.poll_events(before, 10).unwrap();
     let effects = events["events"][0]["effects"].as_array().unwrap();
-    assert!(effects.iter().any(|e| e["type"] == "phase_reopened" && e["phase"] == "Current work"));
+    assert!(effects.iter().any(|e| e["type"] == "phase_reopened" && e["phase"] == "Phase 1"));
 }
 
 #[test]
@@ -707,7 +707,7 @@ fn open_questions_hold_a_phase_and_default_to_the_blocked_cards_phase() {
         .unwrap();
     assert_eq!(free["phase_id"], later["phase_id"]);
     let explicit = store
-        .raise_question_in_phase("agent", &board, "engineering", "Back?", "", &["A".into(), "B".into()], "A", "simple", &[], Some("Current work"))
+        .raise_question_in_phase("agent", &board, "engineering", "Back?", "", &["A".into(), "B".into()], "A", "simple", &[], Some("Phase 1"))
         .unwrap();
     assert_eq!(store.list_phases(&board).unwrap()[0]["status"], "current");
     store.resolve_question("ui", explicit["key"].as_str().unwrap(), "A", None, 1, false).unwrap();
@@ -2202,4 +2202,16 @@ fn pool_defaults_to_three_until_chosen_and_explicit_choices_stick() {
     expire_lease(&store, &board);
     let again = store.orchestrator_acquire(&board, "run-2", "h", None, 30, None).unwrap();
     assert_eq!(again["pool_size"], 1);
+}
+
+
+#[test]
+fn rename_phase_renames_in_place_and_refuses_duplicates() {
+    let (_dir, store, board) = setup();
+    store.add_phase("agent", &board, "Later").unwrap();
+    let phase = store.rename_phase("agent", &board, "Phase 1", "Foundations", 1).unwrap();
+    assert_eq!(phase["name"], "Foundations");
+    assert_eq!(phase["version"], 2);
+    assert_eq!(store.rename_phase("agent", &board, "Foundations", "later", 2).unwrap_err().code, "duplicate_phase");
+    assert_eq!(store.rename_phase("agent", &board, "Foundations", "X", 1).unwrap_err().code, "version_conflict");
 }

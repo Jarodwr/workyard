@@ -121,7 +121,7 @@ export const isDemo = !("__TAURI_INTERNALS__" in window);
 
 let demoBoard: Board = {
   id: "demo-board", key: "B-1", name: "Workyard demo", description: "Animation fixture", version: 1, archived: false, project_id: "demo-project",
-  current_phase_id: "demo-phase", phases: [{ id: "demo-phase", board_id: "demo-board", name: "Current work", description: "Build the local command and event foundation.", version: 1, position: 0, status: "current" }, { id: "demo-phase-2", board_id: "demo-board", name: "Integration", description: "Connect agents, questions, and the desktop view.", version: 1, position: 1, status: "future" }],
+  current_phase_id: "demo-phase", phases: [{ id: "demo-phase", board_id: "demo-board", name: "Phase 1", description: "Build the local command and event foundation.", version: 1, position: 0, status: "current" }, { id: "demo-phase-2", board_id: "demo-board", name: "Integration", description: "Connect agents, questions, and the desktop view.", version: 1, position: 1, status: "future" }],
   lanes: [
     { id: "backlog", name: "Backlog", kind: "backlog", position: 0, version: 1, cards: [
       { id: "demo-1", key: "C-1", board_id: "demo-board", phase_id: "demo-phase", lane_id: "backlog", position: 0, title: "Build the event stream", description: "One event per action, with effects.", priority: "P1", blocking_impact: 0, progress: 30, status_note: "Schema is ready", agent_type: "Engineering", owner_actor: null, version: 1, blocked: false, ready: true, blockers: [], open_question_count: 0 },
@@ -140,7 +140,7 @@ demoRuntimeBoard.key = "B-2";
 demoRuntimeBoard.name = "Agent runtime";
 demoRuntimeBoard.description = "Orchestrator events, sessions, and handoffs";
 demoRuntimeBoard.current_phase_id = "demo-runtime-phase";
-demoRuntimeBoard.phases = [{ id: "demo-runtime-phase", board_id: demoRuntimeBoard.id, name: "Current work", description: "Define session ownership and handoffs.", version: 1, position: 0, status: "current" }];
+demoRuntimeBoard.phases = [{ id: "demo-runtime-phase", board_id: demoRuntimeBoard.id, name: "Phase 1", description: "Define session ownership and handoffs.", version: 1, position: 0, status: "current" }];
 demoRuntimeBoard.lanes = demoRuntimeBoard.lanes.map((lane) => ({ ...lane, id: `runtime-${lane.id}`, cards: [] }));
 const demoResearchBoard: Board = structuredClone(demoRuntimeBoard);
 demoResearchBoard.id = "demo-research";
@@ -149,7 +149,7 @@ demoResearchBoard.name = "Research backlog";
 demoResearchBoard.description = "Investigations without code delivery";
 demoResearchBoard.project_id = "demo-field-notes";
 demoResearchBoard.current_phase_id = "demo-research-phase";
-demoResearchBoard.phases = [{ id: "demo-research-phase", board_id: demoResearchBoard.id, name: "Current work", description: "Investigate local-first onboarding needs.", version: 1, position: 0, status: "current" }];
+demoResearchBoard.phases = [{ id: "demo-research-phase", board_id: demoResearchBoard.id, name: "Phase 1", description: "Investigate local-first onboarding needs.", version: 1, position: 0, status: "current" }];
 demoResearchBoard.lanes = demoResearchBoard.lanes.map((lane) => ({ ...lane, id: `research-${lane.kind}`, cards: [] }));
 let demoEvents: BoardEvent[] = [];
 let demoNextId = 3;

@@ -364,6 +364,32 @@ impl Store {
         Ok(after)
     }
 
+    pub fn rename_phase(&self, actor: &str, board: &str, phase: &str, name: &str, expected: i64) -> Result<Value> {
+        require_nonblank("phase name", name)?;
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_board_active(&tx, &board_id)?;
+        let (phase_id, _) = resolve_phase(&tx, &board_id, Some(phase))?;
+        ensure_phase_open(&tx, &board_id, &phase_id)?;
+        let before = phase_row(&tx, &phase_id)?;
+        check_version(&before, expected)?;
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM phases WHERE board_id=?1 AND id!=?2 AND lower(name)=lower(?3))",
+            params![board_id, phase_id, name.trim()],
+            |r| r.get(0),
+        )?;
+        if taken {
+            return Err(Error::new("duplicate_phase", "phase name already exists on this board"));
+        }
+        tx.execute("UPDATE phases SET name=?2,version=version+1 WHERE id=?1", params![phase_id, name.trim()])?;
+        tx.execute("UPDATE boards SET version=version+1 WHERE id=?1", [&board_id])?;
+        let after = phase_row(&tx, &phase_id)?;
+        record(&tx, actor, "phase_renamed", &board_id, "phase", &phase_id, Some(&before), Some(&after), &[], "")?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
     pub fn assign_phase(
         &self,
         actor: &str,
