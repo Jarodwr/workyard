@@ -14,7 +14,7 @@ use uuid::Uuid;
 mod actor_policy;
 mod orchestrator;
 mod permissions;
-pub use orchestrator::DEFAULT_LEASE_SECONDS;
+pub use orchestrator::{DEFAULT_LEASE_SECONDS, DEFAULT_POOL_SIZE};
 mod phases;
 pub use orchestrator::parse_env_pair;
 pub use phases::parse_phase_window;
