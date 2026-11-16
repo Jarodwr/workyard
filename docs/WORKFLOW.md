@@ -26,7 +26,7 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 ```
 
 - From a terminal it stays in the foreground; Ctrl-C stops the workers, pauses their sessions, and releases the board.
-- Each worker runs `claude -p` in its own git worktree (`<repo>/.workyard/worktrees/<card>`, branch `workyard/<card>`) and finishes by merging its own work into the main branch. It is not sandboxed to the worktree, so it can do that merge. Workers run with permission checks off by default (`--permissions full`); pass `--permissions safe` for edits plus an allowlist of commands. Investigations (`--workspace none`) run in the repository without a worktree.
+- Each worker runs `claude -p` in its own git worktree (`<repo>/.workyard/worktrees/<card>`, branch `workyard/<card>`) and finishes by merging its own work into the main branch. A new worktree first runs `scripts/worktree-setup.sh` (see ORCHESTRATOR.md) so `app/node_modules` and the staged sidecar are present. It is not sandboxed to the worktree, so it can do that merge. Workers run with permission checks off by default (`--permissions full`); pass `--permissions safe` for edits plus an allowlist of commands. Investigations (`--workspace none`) run in the repository without a worktree.
 - Only one orchestrator can hold a board; a second `orch run` is refused and names the holder.
 - macOS notifications tell you when a question needs an answer, a commit needs review, a card needs a human, or the board is waiting on a usage limit. Add `--no-notify` to silence them.
 
