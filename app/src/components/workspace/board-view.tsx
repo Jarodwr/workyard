@@ -44,6 +44,7 @@ type Props = {
   onHold: (card: Card) => Promise<boolean>;
   onAddNote: (card: Card, body: string) => Promise<boolean>;
   onReviewRequired: (required: boolean) => void;
+  onIntegration: (integration: "merge" | "rebase") => void;
   onOpen: (id: string) => void;
   onAnswer: (question: Question, answer: string, note: string) => Promise<boolean>;
   onAssignStakeholder: (question: Question, stakeholderId: string) => Promise<boolean>;
@@ -78,6 +79,7 @@ export function BoardView({
   onHold,
   onAddNote,
   onReviewRequired,
+  onIntegration,
   onOpen,
   onAnswer,
   onAssignStakeholder,
@@ -144,6 +146,8 @@ export function BoardView({
         onToggleAgents={() => setAgentsOpen((value) => !value)}
         reviewRequired={board.review_required === true}
         onReviewRequired={onReviewRequired}
+        integration={board.integration ?? "merge"}
+        onIntegration={onIntegration}
       />
       <div className="flex min-h-0 flex-1 gap-3">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">

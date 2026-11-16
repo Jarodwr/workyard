@@ -36,6 +36,7 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 |---|---|
 | Answer a question | Open it in the phase graph or the stakeholder view and pick an option. The worker resumes with your answer. |
 | Approve code | Card → Code changes → **Approve this commit**. A card with a review gate cannot reach Done without it. Review is off by default; `workyard plan board-review <board> on` turns it on for new changes. |
+| Choose merge or rebase | Board settings → **Integration**, or `workyard plan board-integration <board> merge\|rebase`. `merge` (default) has workers merge the target into their branch, leaving a merge commit per card; `rebase` has them rebase onto the target and fast-forward, so history stays linear. Either way the Done gate is the same: the branch tip must be on the target. |
 | Tell a worker something | Add a note on its card. It reaches the running worker within moments (at its next tool step), or its next briefing if it is paused. |
 | Pause new work | **Pause** in the board's orchestrator bar (or `workyard orch pause B-1`). Running workers continue; **Drain** also stops starting anything while they finish. **Resume** to carry on. |
 | Edit the plan safely | Pause, edit, resume. |
