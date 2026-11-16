@@ -12,7 +12,7 @@ Workyard is a local kanban shared with humans. Use the `workyard` CLI with `--js
 1. Read the card: `workyard --json card C-12`. Note its `version`, blockers, notes, and phase.
 2. Claim it if unclaimed: `workyard --json task claim C-12 --expected-version N`, then `task move C-12 "In Progress"`.
 3. Work. After each meaningful step report it: `workyard --json task progress C-12 40 --note "short status"`. Each write returns the card's new `version`; reuse it.
-4. If you need a human decision, do not guess. Ask: `workyard --json task ask <board> "Title" --kind engineering|business --option "A" --option "B" --recommend "A" --why "simple reason" --blocks C-12`. Give 2-10 real choices; `Other` is added for you. Then stop and wait; the answer arrives in your briefing.
+4. If you need a human decision, do not guess. Ask: `workyard --json task ask <board> "Title" --kind engineering|business --option "A" --option "B" --recommend "A" --why "simple reason" --blocks C-12`. Give 2-10 real choices; `Other` is added for you. Then pause your session with `workyard orch session pause C-12 --waiting-question Q-3` and stop. The orchestrator resumes you when the question is answered, and the answer arrives in your briefing.
 5. Code changes: `task link-change C-12 <repository> <branch> --review-required`. After each new commit run `task update-change <change> <commit>`, which clears earlier approval. A human approves in the desktop app; you cannot approve your own change.
 6. Finish: `task move C-12 Done` only when the work is integrated and checks pass. Otherwise `task release C-12`.
 

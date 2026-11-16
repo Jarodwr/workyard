@@ -252,6 +252,7 @@ workyard plan phase list|add|describe|complete|advance|assign
 workyard plan cancel <C-1> --reason "..."
 
 # orch: orchestrator and operator
+workyard orch run <B-1> [--pool N] [--cwd REPO]  # foreground orchestrator; one per board
 workyard orch status <B-1>                       # state, cursor, pool, lease
 workyard orch pause|resume|drain <B-1>           # desired state; pause only stops new dispatches
 workyard orch pool <B-1> <n>

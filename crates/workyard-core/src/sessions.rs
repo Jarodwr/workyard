@@ -312,6 +312,30 @@ impl Store {
         Ok(after)
     }
 
+    /// Attached sessions for a board's cards with the card state an orchestrator needs to
+    /// reconcile its workers: owner, whether the card was cancelled, and the session row.
+    pub fn list_task_sessions(&self, board: &str) -> Result<Value> {
+        let db = self.open()?;
+        let board_id = super::resolve_board(&db, board)?;
+        let mut stmt = db.prepare("SELECT s.id,c.id FROM task_sessions s JOIN cards c ON c.id=s.card_id WHERE c.board_id=?1 AND s.detached_at IS NULL ORDER BY c.key")?;
+        let ids = stmt
+            .query_map([&board_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for (session_id, card_id) in ids {
+            let card = card_row(&db, &card_id)?;
+            out.push(json!({
+                "card_key": card["key"],
+                "owner_actor": card["owner_actor"],
+                "cancelled": card["cancelled_at"].is_string(),
+                "session": session_row(&db, &session_id)?,
+            }));
+        }
+        Ok(Value::Array(out))
+    }
+
     pub fn task_session_briefing(
         &self,
         card: &str,

@@ -10,5 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+ctrlc = { version = "3", features = ["termination"] }
 serde_json.workspace = true
 workyard-core = { path = "../workyard-core" }
+workyard-orchestrator = { path = "../workyard-orchestrator" }

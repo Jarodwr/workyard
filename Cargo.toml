@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/workyard-core", "crates/workyard-cli", "app/src-tauri"]
+members = ["crates/workyard-core", "crates/workyard-orchestrator", "crates/workyard-cli", "app/src-tauri"]
 resolver = "3"
 
 [workspace.package]

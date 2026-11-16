@@ -2,7 +2,11 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use workyard_core::{BoardFilter, DEFAULT_LEASE_SECONDS, Error, Store};
+use workyard_orchestrator::{ClaudeRunner, Options, Orchestrator, hostname};
 
 #[derive(Parser)]
 #[command(name = "workyard", about = "Local kanban for work with AI agents")]
@@ -297,6 +301,26 @@ enum PlanCommand {
 
 #[derive(Subcommand)]
 enum OrchCommand {
+    /// Run the orchestrator for a board in the foreground until Ctrl-C. Only one may hold
+    /// a board; a second fails with orchestrator_conflict.
+    Run {
+        board: String,
+        /// Maximum concurrent workers (kept on the board across restarts)
+        #[arg(long)]
+        pool: Option<i64>,
+        /// Claude Code binary used to run workers headless
+        #[arg(long, default_value = "claude")]
+        claude_bin: String,
+        /// Extra argument for every worker (repeatable); replaces the defaults when given
+        #[arg(long = "claude-arg", allow_hyphen_values = true)]
+        claude_args: Vec<String>,
+        /// Directory workers run in, usually the project's repository
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Consecutive failed runs before a card's session is detached
+        #[arg(long, default_value_t = 3)]
+        max_failures: u32,
+    },
     /// Show the board's orchestrator: state, cursor, pool size, and lease.
     Status { board: String },
     /// Stop dispatching new work. Running workers continue.
@@ -720,6 +744,14 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
 
 fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::Result<Value> {
     Ok(match command {
+        OrchCommand::Run {
+            board,
+            pool,
+            claude_bin,
+            claude_args,
+            cwd,
+            max_failures,
+        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, cwd, max_failures)?,
         OrchCommand::Status { board } => store.orchestrator_status(&board)?,
         OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
         OrchCommand::Resume { board } => store.orchestrator_set_state(actor, &board, "running")?,
@@ -812,14 +844,47 @@ fn run_admin(store: &Store, actor: &str, command: AdminCommand) -> workyard_core
     })
 }
 
-fn hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|h| h.trim().to_owned())
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "localhost".into())
+/// Claude Code arguments for headless workers. Workers may run the `workyard` CLI and edit
+/// files; anything else needs the user to pass their own `--claude-arg` set.
+fn default_claude_args() -> Vec<String> {
+    ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(workyard:*)"]
+        .map(String::from)
+        .to_vec()
+}
+
+fn run_orchestrator(
+    store: &Store,
+    board: &str,
+    pool: Option<i64>,
+    claude_bin: String,
+    claude_args: Vec<String>,
+    cwd: Option<PathBuf>,
+    max_failures: u32,
+) -> workyard_core::Result<Value> {
+    let db = store.path().to_path_buf();
+    let mut log_dir = db.clone().into_os_string();
+    log_dir.push(".logs");
+    let runner = ClaudeRunner {
+        bin: claude_bin,
+        args: if claude_args.is_empty() { default_claude_args() } else { claude_args },
+        db,
+        cwd,
+        log_dir: PathBuf::from(log_dir),
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    if let Err(error) = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst)) {
+        eprintln!("warning: Ctrl-C will not stop workers or release the lease cleanly: {error}");
+    }
+    let options = Options {
+        holder: format!("cli:{}", std::process::id()),
+        pool,
+        max_failures,
+        ..Options::default()
+    };
+    eprintln!("Orchestrating {board}. Press Ctrl-C to stop; workers are paused and the lease released.");
+    Orchestrator::new(store, board, Box::new(runner), options).run(&stop)?;
+    Ok(json!({"stopped": true}))
 }
 
 /// Print each new event as one JSON line, waking on every commit (with a 2s safety poll).
