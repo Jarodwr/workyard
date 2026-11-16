@@ -65,7 +65,7 @@ if [ $dry -eq 1 ]; then
   echo "dry run: would build"
   echo "  cargo build --release -p workyard-cli --locked"
   echo "  dist/$tarball (bin/workyard, share/workyard/plugin, LICENSE)"
-  [ $app -eq 1 ] && echo "  (cd app && yarn install --frozen-lockfile && npx tauri build) -> dist/$dmg"
+  [ $app -eq 1 ] && echo "  (cd app && yarn install --frozen-lockfile && npx tauri build --bundles dmg) -> dist/$dmg"
   echo "  dist/SHA256SUMS"
 else
   cargo build --release -p workyard-cli --locked
