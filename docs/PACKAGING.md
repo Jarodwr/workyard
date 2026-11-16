@@ -12,7 +12,7 @@ npx tauri build --debug --bundles app                # quick check (verified: bu
 
 - `scripts/stage-sidecar.sh --debug` stages a debug CLI for development. **Tauri refuses to build the app crate while `binaries/workyard-<triple>` is missing** (`bundle.externalBin`), including `cargo check -p workyard-desktop`. Run the script once after cloning; the staged file is gitignored.
 - Cross target: `scripts/stage-sidecar.sh --target x86_64-apple-darwin` then `npx tauri build --target x86_64-apple-darwin`.
-- Config: `app/src-tauri/tauri.conf.json` (`externalBin`, `resources`, `icon`, `targets: app, dmg`, identifier `dev.workyard.app`). Icons were generated from a 128px placeholder; replace `app/src-tauri/icons/icon.png` with a 1024px source and run `npx tauri icon src-tauri/icons/icon.png`.
+- Config: `app/src-tauri/tauri.conf.json` (`externalBin`, `resources`, `icon`, `targets: app, dmg`, identifier `dev.workyard.app`). Icons are generated from `app/src-tauri/icons/source/icon.svg` (export it to `icon-1024.png` next to it, e.g. `qlmanage -t -s 1024 -o /tmp icon.svg` on macOS), then `cd app && npx tauri icon src-tauri/icons/source/icon-1024.png`; delete the `android/` and `ios/` folders it also emits.
 
 ## What the bundle contains
 
