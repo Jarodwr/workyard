@@ -2083,13 +2083,21 @@ fn annotate_claim_activity(db: &Connection, card: &mut Value) -> Result<()> {
     let (owner, id) = (owner.as_str(), id.as_str());
     // Enough for a board to offer "open this agent in a terminal" without a per-card read.
     if let Some(session) = sessions::active_session(db, id)? {
+        let (activity, activity_at) = session_activity(db, session["id"].as_str().unwrap_or_default())?;
+        let elapsed_secs = session["attached_at"]
+            .as_str()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| Utc::now().signed_duration_since(at).num_seconds().max(0));
         card["session"] = json!({
             "runner": session["runner"],
             "paused": session["paused_at"].is_string(),
             "held_by": session["held_by"],
             "waiting_integration": session["waiting_integration"],
-            "activity": session_activity(db, session["id"].as_str().unwrap_or_default())?.0,
-            "activity_at": session_activity(db, session["id"].as_str().unwrap_or_default())?.1,
+            "tool_uses": tool_uses_in(&activity),
+            "attached_at": session["attached_at"],
+            "elapsed_secs": elapsed_secs,
+            "activity": activity,
+            "activity_at": activity_at,
         });
     }
     let lane_kind: String = db.query_row(
@@ -2120,6 +2128,15 @@ fn annotate_claim_activity(db: &Connection, card: &mut Value) -> Result<()> {
         card["stale"] = json!(silent > chrono::Duration::minutes(stale_after_minutes()));
     }
     Ok(())
+}
+/// The tool-use count the runner appends to the activity text ("Edit a.rs (12 tool uses)").
+fn tool_uses_in(activity: &str) -> u32 {
+    activity
+        .trim_end()
+        .strip_suffix(" tool uses)")
+        .and_then(|head| head.rsplit_once('('))
+        .and_then(|(_, n)| n.parse().ok())
+        .unwrap_or(0)
 }
 fn session_activity(db: &Connection, session_id: &str) -> Result<(String, Option<String>)> {
     Ok(db
@@ -2394,4 +2411,16 @@ fn changed_state_effects(
         }
     }
     Ok(effects)
+}
+
+#[cfg(test)]
+mod tool_uses_tests {
+    use super::tool_uses_in;
+
+    #[test]
+    fn reads_the_runner_suffix() {
+        assert_eq!(tool_uses_in("Edit a.rs (12 tool uses)"), 12);
+        assert_eq!(tool_uses_in("thinking"), 0);
+        assert_eq!(tool_uses_in(""), 0);
+    }
 }

@@ -6,7 +6,7 @@ import {
 import { client, type Board, type Card, type Dependency, type Project, type Question } from "@/api";
 import { AgentTerminalButton } from "@/components/workspace/agent-terminal-button";
 import { stateTone } from "@/components/workspace/agents-dock";
-import { agentState } from "@/lib/agents";
+import { agentState, progressDisplay } from "@/lib/agents";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -226,9 +226,9 @@ export function DependencyView({
                       </span>
                       <strong className="mt-1 line-clamp-2 w-full text-xs leading-4">{node.title}</strong>
                       {card && (
-                        <span className="mt-auto flex w-full items-center gap-1.5" aria-label={`${card.progress}% complete`}>
-                          <Progress value={card.progress} className="h-1 flex-1" />
-                          <span className="w-7 text-right text-[9px] tabular-nums leading-none text-muted-foreground">{card.progress}%</span>
+                        <span className="mt-auto flex w-full items-center gap-1.5" aria-label={`${progressDisplay(card).value}% ${progressDisplay(card).estimated ? "estimated" : "complete"}`} title={progressDisplay(card).estimated ? "Estimated" : undefined}>
+                          <Progress value={progressDisplay(card).value} estimated={progressDisplay(card).estimated} className="h-1 flex-1" />
+                          <span className="w-7 text-right text-[9px] tabular-nums leading-none text-muted-foreground">{progressDisplay(card).estimated ? "~" : ""}{progressDisplay(card).value}%</span>
                         </span>
                       )}
                       <span className={cn("w-full truncate pr-12 text-[10px] text-muted-foreground", card ? "mt-1" : "mt-auto", running && card?.session?.activity && "text-primary")} title={running ? card?.session?.activity : undefined}>{node.cancelled ? `Cancelled: ${card?.cancellation_reason ?? ""}` : card ? (running && card.session?.activity ? card.session.activity : node.detail) : questionOnlyCount > 0 ? `Only questions block ${questionOnlyCount} task${questionOnlyCount === 1 ? "" : "s"}` : question?.recommended_option ? `Suggests: ${question.recommended_option}` : node.resolved ? "Resolved" : "Open"}</span>
