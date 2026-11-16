@@ -171,9 +171,9 @@ export function CardDetail({
             />
 
             <TabPanel prefix={PREFIX} id="overview" active={tab === "overview"}>
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
-                {card.description || "No description yet."}
-              </p>
+              {card.description
+                ? <Markdown source={card.description} />
+                : <p className="text-sm leading-relaxed text-muted-foreground">No description yet.</p>}
               {card.cancelled_at && <p className="mt-3 rounded border p-3 text-xs text-muted-foreground">Cancelled: {card.cancellation_reason}</p>}
               <div className="mt-4 grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
                 <UiCard className="p-2.5 shadow-none">
@@ -261,7 +261,7 @@ export function CardDetail({
                 <p className="text-xs text-muted-foreground">Leave context for the agent without changing its ticket.</p>
                 {detail?.notes.map((item) => (
                   <div key={item.id} className="rounded-lg border bg-card p-3 text-xs">
-                    <p className="whitespace-pre-wrap leading-relaxed">{item.body}</p>
+                    <Markdown source={item.body} className="text-xs" />
                     <p className="mt-2 text-muted-foreground">{item.actor} · {new Date(item.created_at).toLocaleString()}</p>
                   </div>
                 ))}

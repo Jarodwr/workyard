@@ -114,3 +114,12 @@ export function parseMarkdown(source: string): Block[] {
   }
   return blocks;
 }
+
+/** Parses markdown, or returns null when parsing throws so callers can show the source as plain text. */
+export function tryParseMarkdown(source: string): Block[] | null {
+  try {
+    return parseMarkdown(source);
+  } catch {
+    return null;
+  }
+}
