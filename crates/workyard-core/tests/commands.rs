@@ -1671,6 +1671,28 @@ fn owner_may_omit_version_but_others_may_not() {
     store.release_card("agent:a", key, None::<i64>, None).unwrap();
 }
 
+#[test]
+fn owner_links_and_updates_a_change_without_a_version() {
+    let (_dir, store, board) = setup();
+    let project = store.create_project("agent:a", "Code", "").unwrap();
+    let project_id = project["id"].as_str().unwrap();
+    store.attach_board_to_project("agent:a", &board, project_id, 1).unwrap();
+    let repo = store.add_project_repository("agent:a", project_id, "/tmp/code", "main", None).unwrap();
+    let repo_id = repo["id"].as_str().unwrap();
+    let card = store.create_card("agent:a", &board, "Task", "", "P2", None).unwrap();
+    let key = card["key"].as_str().unwrap();
+    store.claim_card("agent:a", key, 1).unwrap();
+    // A non-owner without a version is refused.
+    let err = store.link_card_change("agent:b", key, repo_id, "feat", None, "abc", false, None::<i64>).unwrap_err();
+    assert_eq!(err.code, "ownership_conflict");
+    let change = store.link_card_change("agent:a", key, repo_id, "feat", None, "abc", false, None::<i64>).unwrap();
+    let id = change["id"].as_str().unwrap();
+    let err = store.update_card_change("agent:b", id, "def", None::<i64>).unwrap_err();
+    assert_eq!(err.code, "ownership_conflict");
+    let updated = store.update_card_change("agent:a", id, "def", None::<i64>).unwrap();
+    assert_eq!(updated["commit_oid"], "def");
+}
+
 fn expire_lease(store: &Store, board_key: &str) {
     store
         .open()

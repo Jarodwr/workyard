@@ -1000,7 +1000,9 @@ ask with a recommendation instead of guessing: `workyard --json task ask {board}
 then `workyard orch session pause {key} --waiting-question <Q-key>` and stop; you are resumed with the answer. \
 Example: title \"Should archived boards still show in the board picker?\", options \"Hide them\" / \"Show them dimmed\" / \"Behind a toggle\", recommend \"Behind a toggle\", \
 why \"it keeps the picker short without making archived work unreachable, and the toggle is cheap to build\". Give 2-4 real options, one recommendation and a one-line reason. \
-Do not raise a question for a mechanical blocker: a refused tool or command, a merge conflict you can resolve, a failing test you can fix. Fix it or work around it."
+Do not raise a question for a mechanical blocker: a refused tool or command, a merge conflict you can resolve, a failing test you can fix. Fix it or work around it.\n\
+Code changes: you decide whether this card changes code. If you changed code, link your branch with `workyard task link-change` (no version needed) and integrate it before you move the card to Done; \
+if you changed nothing, say so in the card note and finish."
     )
 }
 
@@ -1165,6 +1167,8 @@ mod integration_prompt_tests {
             assert!(prompt.contains("--recommend"));
             assert!(prompt.contains("Do not raise a question for a mechanical blocker"));
             assert!(prompt.contains("Behind a toggle"));
+            assert!(prompt.contains("`workyard task link-change` (no version needed)"));
+            assert!(prompt.contains("if you changed nothing, say so in the card note and finish"));
         }
     }
 

@@ -370,14 +370,15 @@ impl Store {
         target: Option<&str>,
         commit: &str,
         review_required: impl Into<Option<bool>>,
-        expected: i64,
+        expected: impl Into<Option<i64>>,
     ) -> Result<Value> {
         require_nonblank("branch", branch)?;
+        let expected: Option<i64> = expected.into();
         let review_required: Option<bool> = review_required.into();
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let card_id = resolve_card(&tx, card)?;
-        let before = guard_card(&tx, &card_id, actor, Some(expected))?;
+        let before = guard_card(&tx, &card_id, actor, expected)?;
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
         crate::phases::ensure_phase_open(&tx, board_id, before["phase_id"].as_str().unwrap())?;
@@ -439,15 +440,20 @@ impl Store {
         actor: &str,
         change: &str,
         commit: &str,
-        expected: i64,
+        expected: impl Into<Option<i64>>,
     ) -> Result<Value> {
         require_nonblank("commit", commit)?;
+        let expected: Option<i64> = expected.into();
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let before = change_row(&tx, change)?;
-        check_version(&before, expected)?;
         let card_id = before["card_id"].as_str().unwrap();
         let card = card_row(&tx, card_id)?;
+        match expected {
+            Some(expected) => check_version(&before, expected)?,
+            None if card["owner_actor"].as_str() == Some(actor) => {}
+            None => return Err(super::version_required(&card, actor)),
+        }
         let board_id = card["board_id"].as_str().unwrap();
         crate::phases::ensure_phase_open(&tx, board_id, card["phase_id"].as_str().unwrap())?;
         if card["cancelled_at"].is_string() {
