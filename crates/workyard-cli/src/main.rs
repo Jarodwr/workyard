@@ -357,6 +357,14 @@ enum OrchCommand {
         /// With `--permissions safe`, one more allowed tool pattern, for example `Bash(make:*)`
         #[arg(long = "allow")]
         allow: Vec<String>,
+        /// Also run a supervisor agent that is told what needs judgement and acts through the CLI
+        /// (costs tokens while it works)
+        #[arg(long)]
+        supervisor: bool,
+        /// The Workyard Claude plugin workers load (its skill and actor hook). Found next to the
+        /// app or in a checkout when omitted; `WORKYARD_PLUGIN_DIR` also works
+        #[arg(long)]
+        plugin_dir: Option<PathBuf>,
         /// Directory workers run in, usually the project's repository
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -842,10 +850,12 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             claude_args,
             permissions,
             allow,
+            supervisor,
+            plugin_dir,
             cwd,
             max_failures,
             no_notify,
-        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, cwd, max_failures, !no_notify)?,
+        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, supervisor, plugin_dir, cwd, max_failures, !no_notify)?,
         OrchCommand::Status { board } => store.orchestrator_status(&board)?,
         OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
         OrchCommand::Resume { board } => store.orchestrator_set_state(actor, &board, "running")?,
@@ -964,6 +974,21 @@ fn permission_args(permissions: Permissions, allow: &[String]) -> Vec<String> {
     }
 }
 
+/// Where the Workyard plugin is: `WORKYARD_PLUGIN_DIR`, the app bundle's resources, or a
+/// checkout above the running binary (`target/debug/workyard` inside the repository).
+fn find_plugin_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("WORKYARD_PLUGIN_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let is_plugin = |dir: &PathBuf| dir.join(".claude-plugin/plugin.json").exists();
+    let bundled = exe.parent()?.parent()?.join("Resources/marketplace/plugin");
+    if is_plugin(&bundled) {
+        return Some(bundled);
+    }
+    exe.ancestors().map(|dir| dir.join("plugin")).find(is_plugin)
+}
+
 fn run_orchestrator(
     store: &Store,
     board: &str,
@@ -972,6 +997,8 @@ fn run_orchestrator(
     claude_args: Vec<String>,
     permissions: Permissions,
     allow: Vec<String>,
+    supervisor: bool,
+    plugin_dir: Option<PathBuf>,
     cwd: Option<PathBuf>,
     max_failures: u32,
     notify: bool,
@@ -979,9 +1006,15 @@ fn run_orchestrator(
     let db = store.path().to_path_buf();
     let mut log_dir = db.clone().into_os_string();
     log_dir.push(".logs");
+    let mut args = if claude_args.is_empty() { permission_args(permissions, &allow) } else { claude_args };
+    if let Some(plugin) = plugin_dir.or_else(find_plugin_dir) {
+        args.extend(["--plugin-dir".into(), plugin.to_string_lossy().into_owned()]);
+    } else {
+        eprintln!("warning: no Workyard plugin found; workers will not have its skill (pass --plugin-dir)");
+    }
     let runner = ClaudeRunner {
         bin: claude_bin,
-        args: if claude_args.is_empty() { permission_args(permissions, &allow) } else { claude_args },
+        args,
         db,
         cwd,
         log_dir: PathBuf::from(log_dir),
@@ -999,6 +1032,7 @@ fn run_orchestrator(
             Permissions::Full => "full".into(),
             Permissions::Safe => "safe".into(),
         },
+        supervisor,
         ..Options::default()
     };
     eprintln!("Orchestrating {board}. Press Ctrl-C to stop; workers are paused and the lease released.");

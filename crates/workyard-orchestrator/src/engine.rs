@@ -41,6 +41,9 @@ pub struct Options {
     pub activity_interval: Duration,
     /// `full` or `safe`: how much workers may do without asking. Recorded on the board.
     pub permissions: String,
+    /// Run a long-lived supervisor agent that is told what needs judgement (stuck workers,
+    /// questions, failures) and acts through the `workyard` CLI. Costs tokens, so off by default.
+    pub supervisor: bool,
 }
 
 impl Default for Options {
@@ -59,6 +62,7 @@ impl Default for Options {
             max_reclaims: 2,
             activity_interval: Duration::from_secs(2),
             permissions: "full".into(),
+            supervisor: false,
         }
     }
 }
@@ -79,6 +83,12 @@ pub struct Orchestrator<'a> {
     runner: Box<dyn Runner>,
     opts: Options,
     live: HashMap<String, Live>,
+    /// The supervisor agent, when enabled, and how many times it was started.
+    supervisor: Option<Live>,
+    supervisor_starts: u32,
+    /// Things the supervisor should hear about, sent in one message every few seconds.
+    digest: std::cell::RefCell<Vec<String>>,
+    digest_sent: Instant,
     failures: HashMap<String, u32>,
     fast_failures: u32,
     limit_streak: u32,
@@ -107,6 +117,10 @@ impl<'a> Orchestrator<'a> {
             runner,
             opts,
             live: HashMap::new(),
+            supervisor: None,
+            supervisor_starts: 0,
+            digest: std::cell::RefCell::new(Vec::new()),
+            digest_sent: Instant::now(),
             failures: HashMap::new(),
             fast_failures: 0,
             limit_streak: 0,
@@ -173,6 +187,7 @@ impl<'a> Orchestrator<'a> {
                 }
             }
             self.reap(actor);
+            self.supervise();
             let status = self.store.orchestrator_status(&self.board)?;
             if status["desired_state"] == "running" {
                 self.dispatch_all(actor, stop)?;
@@ -287,6 +302,7 @@ impl<'a> Orchestrator<'a> {
     }
 
     fn set_backoff(&self, actor: &str, until: DateTime<Utc>, reason: &str) {
+        self.tell_supervisor(format!("Dispatch is backing off until {}: {reason}", until.format("%H:%M UTC")));
         self.notifier.notify(
             "Workyard is waiting",
             &format!("{reason}. Dispatch resumes after {}.", until.with_timezone(&chrono::Local).format("%H:%M")),
@@ -304,6 +320,10 @@ impl<'a> Orchestrator<'a> {
         let count = self.failures.entry(key.to_owned()).or_insert(0);
         *count += 1;
         let count = *count;
+        self.tell_supervisor(format!(
+            "The worker on {key} {why} (failure {count} of {}). Its log is in the board's .logs directory.",
+            self.opts.max_failures
+        ));
         if count >= self.opts.max_failures {
             self.failures.remove(key);
             self.log_err(self.store.detach_task_session(actor, key), key);
@@ -498,6 +518,9 @@ impl<'a> Orchestrator<'a> {
             for denial in live.worker.take_denials() {
                 if self.denials_seen.insert(format!("{key}: {denial}")) {
                     self.notifier.notify("Workyard: a tool was refused", &format!("{key}: {denial}"));
+                    if self.opts.supervisor {
+                        self.digest.borrow_mut().push(format!("A tool was refused for the worker on {key}: {denial}"));
+                    }
                 }
                 updates.push((key.clone(), format!("blocked: {denial}"), true));
             }
@@ -535,10 +558,24 @@ impl<'a> Orchestrator<'a> {
         let after = &event["after"];
         let entity = event["entity_id"].as_str().unwrap_or_default();
         match event["type"].as_str().unwrap_or_default() {
-            "question_raised" => self.notifier.notify(
-                "Workyard: a question needs you",
-                &format!("{}: {}", after["key"].as_str().unwrap_or("?"), after["title"].as_str().unwrap_or("")),
-            ),
+            "question_raised" => {
+                self.notifier.notify(
+                    "Workyard: a question needs you",
+                    &format!("{}: {}", after["key"].as_str().unwrap_or("?"), after["title"].as_str().unwrap_or("")),
+                );
+                self.tell_supervisor(format!(
+                    "Question {} ({}) raised: {} Options: {}. Recommended: {}.",
+                    after["key"].as_str().unwrap_or("?"),
+                    after["kind"].as_str().unwrap_or("?"),
+                    after["title"].as_str().unwrap_or(""),
+                    after["options"],
+                    after["recommended_option"].as_str().unwrap_or("none"),
+                ));
+            }
+            "card_reclaimed" => {
+                let key = self.card_key(entity).unwrap_or_default();
+                self.tell_supervisor(format!("{key} was handed back to the backlog after its worker kept failing."));
+            }
             "card_note_added" => {
                 let author = after["actor"].as_str().unwrap_or_default();
                 let Ok(card) = self.store.read_card(entity) else { return };
@@ -579,12 +616,66 @@ impl<'a> Orchestrator<'a> {
         }
     }
 
+    /// Queue something for the supervisor agent; a no-op when none is configured.
+    fn tell_supervisor(&self, line: String) {
+        if self.opts.supervisor {
+            self.digest.borrow_mut().push(line);
+        }
+    }
+
+    /// Keep the supervisor agent running and hand it what happened, batched. The script keeps
+    /// the lease and every process; the supervisor only talks to the board through the CLI.
+    fn supervise(&mut self) {
+        if !self.opts.supervisor {
+            return;
+        }
+        if let Some(live) = self.supervisor.as_mut() {
+            if matches!(live.worker.poll(), WorkerState::Exited { .. }) {
+                self.supervisor = None;
+            }
+        }
+        if self.supervisor.is_none() && self.supervisor_starts < 3 {
+            self.supervisor_starts += 1;
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let launch = Launch {
+                board_key: self.board.clone(),
+                card_key: "SUPERVISOR".into(),
+                actor: format!("agent:supervisor-{}", self.board.to_lowercase()),
+                session_id,
+                prompt: supervisor_prompt(&self.board, &self.opts.permissions),
+                resume: false,
+                workspace: Workspace::None,
+            };
+            match self.runner.start(&launch) {
+                Ok(worker) => self.supervisor = Some(Live { worker, started: Instant::now() }),
+                Err(error) => eprintln!("could not start the supervisor: {error}"),
+            }
+            if self.supervisor.is_none() && self.supervisor_starts >= 3 {
+                self.notifier.notify("Workyard", "The supervisor agent could not be kept running; continuing without it.");
+            }
+        }
+        if self.digest_sent.elapsed() < Duration::from_secs(5) || self.digest.borrow().is_empty() {
+            return;
+        }
+        let Some(live) = self.supervisor.as_mut() else { return };
+        let lines: Vec<String> = std::mem::take(&mut *self.digest.borrow_mut());
+        let message = format!("Board {} events needing your judgement:\n- {}", self.board, lines.join("\n- "));
+        if live.worker.send(&message).is_ok() {
+            self.digest_sent = Instant::now();
+        } else {
+            self.digest.borrow_mut().splice(0..0, lines);
+        }
+    }
+
     fn shutdown(&mut self, actor: &str) {
         let keys: Vec<String> = self.live.keys().cloned().collect();
         for (_, live) in self.live.iter_mut() {
             live.worker.stop();
         }
         self.live.clear();
+        if let Some(mut supervisor) = self.supervisor.take() {
+            supervisor.worker.stop();
+        }
         for key in keys {
             // Resumable later; ignore "already paused" or "no session".
             let _ = self.store.pause_task_session(actor, &key, None);
@@ -689,5 +780,26 @@ Do not raise a question for a mechanical blocker; fix it or work around it.",
         serde_json::to_string(&events).unwrap_or_default(),
         integration_steps(key, ctx),
         if ctx.review { ", `--for-review`" } else { "" },
+    )
+}
+
+/// What the supervisor agent is told once at start. It is woken later by event digests.
+fn supervisor_prompt(board: &str, permissions: &str) -> String {
+    format!(
+        "You are the supervisor agent for Workyard board {board}. A script runs the board (leases, worker processes, \
+limits, backoff); you do the thinking it cannot. You stay running. Messages arrive as lists of board events that \
+need judgement: a worker that kept exiting unfinished, a question, a refused tool, a card handed back to the backlog, a backoff. \
+Between messages do nothing and spend nothing.\n\
+Use only the `workyard` CLI (read with `--json`: `board {board}`, `card <key>`, `questions {board}`, `events`). You may:\n\
+- steer a worker with `workyard task note <card> \"...\"`: a note reaches a running worker at its next step. Say concretely how to get \
+around the problem (use Write/Edit instead of a heredoc, a different command, resolve the merge conflict, run the tests another way).\n\
+- answer an engineering question with `workyard admin answer` ONLY when its kind is engineering, it has a recommended option, and you \
+agree with it. Every other question (business, stakeholder, a choice that costs money or changes scope) is for the human: do nothing, \
+they are already notified.\n\
+- note on a card what you learned when a card keeps failing, so the human can read it.\n\
+You must NOT: approve changes or reviews, move cards between lanes, cancel or force-release cards, change code or files, run git, \
+start or stop processes, or answer for a human. If something needs one of those, leave a note on the card saying what and why. \
+Permissions for workers are `{permissions}`. Keep every action small and say in one line what you did and why.\n\
+Reply 'ready' now."
     )
 }

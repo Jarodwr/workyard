@@ -517,6 +517,46 @@ fn clean_exits_without_finishing_do_not_trip_the_board_wide_guard() {
     h.finish(handle);
 }
 
+#[test]
+fn a_supervisor_is_started_and_told_about_failures_but_only_when_enabled() {
+    let h = Harness::new();
+    h.card("Flaky");
+    let messages = Arc::clone(&h.messages);
+    let stop = Arc::clone(&h.stop);
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            max_failures: 2,
+            max_reclaims: 0,
+            idle_wait: Duration::from_millis(40),
+            supervisor: true,
+            ..Options::default()
+        },
+        move |launch, _| {
+            if launch.card_key == "SUPERVISOR" {
+                // The supervisor stays up until the orchestrator stops.
+                wait_until("stop", || stop.load(Ordering::SeqCst));
+            }
+        },
+    );
+    h.wait("supervisor launched", |_| h.launches.lock().unwrap().iter().any(|(card, _, _)| card == "SUPERVISOR"));
+    h.wait("failure reported to the supervisor", |_| {
+        messages.lock().unwrap().iter().any(|m| m.contains("exited without finishing or pausing"))
+    });
+    h.finish(handle);
+
+    let h = Harness::new();
+    h.card("Flaky");
+    let handle = h.start_with(
+        Options { holder: "test".into(), pool: Some(1), max_failures: 2, max_reclaims: 0, idle_wait: Duration::from_millis(40), ..Options::default() },
+        |_, _| {},
+    );
+    h.wait("card detached", |_| h.event_types().contains(&"task_session_detached".to_owned()));
+    assert!(!h.launches.lock().unwrap().iter().any(|(card, _, _)| card == "SUPERVISOR"));
+    h.finish(handle);
+}
+
 fn wait_until(what: &str, condition: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
