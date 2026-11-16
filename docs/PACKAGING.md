@@ -64,3 +64,25 @@ Unsigned builds run locally; others need right-click Open (or `xattr -dr com.app
 ## CLI changes the skill should follow
 
 Stream A adds `orch session pause --for-integration`, `plan board-review` and `orch run --permissions`. `plugin/skills/workyard/SKILL.md` documents pause with `--waiting-question` and `--for-review` only; once those land, mention `--for-integration` in step 5 and keep the rule that workers use Write/Edit instead of heredocs (added now).
+
+## Stale sidecar and the desktop build
+
+Tauri copies the staged `app/src-tauri/binaries/workyard-<triple>` over `target/<profile>/workyard` on every desktop build and `tauri dev`. That is the path the CLI crate builds to, so a stale staged copy silently replaces a fresh CLI (we saw every `target/debug/workyard` command fail with `schema_too_new` afterwards). To prevent it:
+
+- `beforeDevCommand` runs `scripts/stage-sidecar.sh --debug` and `beforeBuildCommand` runs `scripts/stage-sidecar.sh` (release): the CLI is built first and copied after, then the frontend step runs. `tauri build --debug` still stages a release CLI; that is fine, only freshness matters.
+- `scripts/stage-sidecar.sh --check` builds nothing and exits non-zero with a message if the staged binary is missing, a placeholder, or older than any file in `crates/`, `Cargo.toml` or `Cargo.lock`. Run it in CI before packaging, or from a test.
+- On a fresh checkout or new worktree `app/src-tauri/build.rs` writes a placeholder script into `binaries/` when nothing is staged, so `cargo check/test --workspace` work without staging. The placeholder only exits with an error; `--check` rejects it, and the real build commands above replace it.
+
+## Hazard: `tauri dev` migrates a database that workers still use
+
+`tauri dev` rebuilds and relaunches the desktop whenever `crates/workyard-core` changes. The new desktop opens the database and can migrate it, while a running orchestrator and its workers (an older binary) still use the same file. They then fail with `schema_too_new`, or worse, work against a schema they do not understand.
+
+While an orchestrator run is in progress, run the desktop from a copied binary instead of `tauri dev`, so source edits cannot relaunch it:
+
+```sh
+scripts/stage-sidecar.sh --debug && (cd app && npx tauri build --debug --bundles app)
+cp -R "${CARGO_TARGET_DIR:-target}"/debug/bundle/macos/Workyard.app /tmp/Workyard-run.app
+open /tmp/Workyard-run.app
+```
+
+Keep the orchestrator and workers on a CLI built from the same sources (the copy contains it), and only rebuild or run `tauri dev` again once the run has finished.
