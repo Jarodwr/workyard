@@ -28,11 +28,11 @@ Workyard.app/Contents/Resources/marketplace/    a Claude plugin marketplace
 
 From a checkout: `claude plugin marketplace add <repo>` then `claude plugin install workyard@workyard` (verified in a throwaway `CLAUDE_CONFIG_DIR`; `claude plugin validate` passes for both manifests). From an installed app, add `…/Workyard.app/Contents/Resources/marketplace` instead (verified against the debug bundle). To publish, push the repo and use `claude plugin marketplace add <owner>/<repo>`.
 
-Orchestrator workers load the plugin with `--claude-arg=--plugin-dir --claude-arg=<path to plugin>`. The `SessionStart` hook (`plugin/hooks/actor.sh`) puts `$WORKYARD_BIN` on `PATH` when `workyard` is not installed, and sets a stable actor unless `WORKYARD_ACTOR` is already set. The orchestrator already prepends its own executable's directory to the worker's `PATH`.
+Orchestrator workers load the plugin through `orch run --plugin-dir <path>` (found automatically when omitted). The `SessionStart` hook (`plugin/hooks/actor.sh`) puts `$WORKYARD_BIN` on `PATH` when `workyard` is not installed, and sets a stable actor unless `WORKYARD_ACTOR` is already set. The orchestrator already prepends its own executable's directory to the worker's `PATH`.
 
-## Code the desktop still needs (not done here: `app/src-tauri/src/main.rs` belongs to another stream)
+## How the desktop finds the CLI and plugin
 
-The app must use the bundled CLI and plugin instead of whatever is on `PATH`. Wherever it spawns `workyard` (start orchestrator, open planner, open in terminal), resolve:
+Done in `app/src-tauri/src/main.rs`: the desktop starts the orchestrator and planner with the CLI next to its own executable (falling back to `workyard` on `PATH`), and exports `WORKYARD_BIN=<that directory>` in terminals it opens so the plugin hook finds it. The CLI locates the plugin itself (`--plugin-dir`, `WORKYARD_PLUGIN_DIR`, the app bundle, `<exe dir>/../share/workyard/plugin`, or a checkout). The sketch below shows the idea and is not code to add:
 
 ```rust
 // The CLI is next to the app executable in a bundle (Contents/MacOS/workyard).
@@ -49,7 +49,7 @@ fn bundled_plugin(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
 }
 ```
 
-Fall back to `workyard` on `PATH` and `plugin/` in a checkout in dev. Export `WORKYARD_BIN=<dir of the CLI>` to spawned terminals/workers so the plugin hook finds it. Optionally add `bundled_cli()`'s directory to the user's PATH via "Install CLI" (symlink to `/usr/local/bin/workyard`).
+Not built: an "Install CLI" action that links the bundled CLI into `/usr/local/bin`.
 
 ## Release build verification (2026-11-16, aarch64, unsigned)
 
@@ -77,7 +77,7 @@ Unsigned builds run locally; others need right-click Open (or `xattr -dr com.app
 
 ## CLI changes the skill should follow
 
-Stream A adds `orch session pause --for-integration`, `plan board-review` and `orch run --permissions`. `plugin/skills/workyard/SKILL.md` documents pause with `--waiting-question` and `--for-review` only; once those land, mention `--for-integration` in step 5 and keep the rule that workers use Write/Edit instead of heredocs (added now).
+Done: `orch session pause --for-integration`, `plan board-review` and `orch run --permissions` landed, and `plugin/skills/workyard/SKILL.md` documents `--waiting-question`, `--for-review` and `--for-integration`, the Write/Edit rule, `task report`, and `status`/`wait`. When the CLI surface changes, update the skill in the same commit.
 
 ## Stale sidecar and the desktop build
 
@@ -127,4 +127,4 @@ test do
 end
 ```
 
-Nothing here has been pushed, tagged or installed into a real Homebrew prefix; the formula, its `head` line, the bottle block and the tap's doc are the user's to add.
+Nothing here has been pushed, tagged or installed into a real Homebrew prefix. The rendered formula and cask templates, and the release script, are in [HOMEBREW.md](HOMEBREW.md) and [RELEASING.md](RELEASING.md); publishing them is the user's to do.
