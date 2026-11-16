@@ -2007,7 +2007,7 @@ fn supervisor_limits_are_enforced_in_the_core() {
 /// Put the database back to schema 17, as an older binary leaves it: no version on the lease.
 fn downgrade_to_17(dir: &TempDir) {
     let db = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
-    db.execute_batch("ALTER TABLE orchestrator_sessions DROP COLUMN binary_version; ALTER TABLE orchestrator_sessions DROP COLUMN schema_version; DELETE FROM schema_version WHERE version>=18; DROP TABLE card_reports; PRAGMA user_version = 17").unwrap();
+    db.execute_batch("ALTER TABLE orchestrator_sessions DROP COLUMN binary_version; ALTER TABLE orchestrator_sessions DROP COLUMN schema_version; DELETE FROM schema_version WHERE version>=18; DROP TABLE card_reports; ALTER TABLE boards DROP COLUMN integration; PRAGMA user_version = 17").unwrap();
 }
 
 #[test]
