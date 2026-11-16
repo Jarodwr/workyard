@@ -49,7 +49,7 @@ export function DependencyView({
   const [answerNote, setAnswerNote] = useState("");
   const graphScrollRef = useRef<HTMLDivElement>(null);
   const cards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
-  const visiblePhases = board.phases.filter((phase) => showCompleted || phase.status !== "closed");
+  const visiblePhases = board.phases.filter((phase) => showCompleted || phase.status !== "complete");
   // The board is re-read on every wake so session activity shows live, but edges only change
   // when a card does (adding or removing a dependency bumps its version), so only then reload them.
   const cardSignature = useMemo(() => cards.map((card) => `${card.id}:${card.version}`).join(","), [cards]);
@@ -153,7 +153,7 @@ export function DependencyView({
           <UiCard className="m-4 flex min-h-52 flex-col items-center justify-center gap-2 border-dashed p-8 text-center shadow-none">
             <Link2 className="size-7 text-muted-foreground" />
             <strong className="text-sm">No connected work yet</strong>
-            <p className="text-xs text-muted-foreground">{board.phases.some((phase)=>phase.status==="closed") && !showCompleted ? "Completed phases are hidden. Use Show completed to view them." : "Card and question dependencies will form a graph here."}</p>
+            <p className="text-xs text-muted-foreground">{board.phases.some((phase)=>phase.status==="complete") && !showCompleted ? "Completed phases are hidden. Use Show completed to view them." : "Card and question dependencies will form a graph here."}</p>
           </UiCard>
         ) : (
           <div style={{ width: frame.width, height: frame.height }}>
@@ -161,7 +161,7 @@ export function DependencyView({
               {layout.phaseBands?.map((phase) => <div key={phase.id} className={cn("flex min-w-0 shrink-0 flex-col justify-center border-r border-border/70 px-4", phase.status === "current" ? "bg-primary/10" : "bg-background/95")} style={{ width: phase.width * zoom }}><button className="w-fit max-w-full truncate text-left text-xs font-semibold hover:text-primary hover:underline" onClick={()=>onOpenPhase(phase.id)} title={`Open ${phase.name} Kanban`}>{phase.name}</button><span className="line-clamp-2 text-[10px] leading-3 text-muted-foreground" title={phase.description}>{phase.description || `${phase.status} phase`}</span></div>)}
             </div>
             <div className="relative" style={{ width: layout.width, height: layout.height, transform: `scale(${zoom})`, transformOrigin: "top left" }}>
-              {layout.phaseBands?.map((phase) => <div key={phase.id} className={cn("absolute top-0 h-full border-r border-dashed border-border/70", phase.status === "current" ? "bg-primary/5" : phase.status === "closed" ? "bg-muted/30" : "bg-background/50")} style={{ left: phase.x, width: phase.width }} />)}
+              {layout.phaseBands?.map((phase) => <div key={phase.id} className={cn("absolute top-0 h-full border-r border-dashed border-border/70", phase.status === "current" ? "bg-primary/5" : phase.status === "complete" ? "bg-muted/30" : "bg-background/50")} style={{ left: phase.x, width: phase.width }} />)}
               {layout.nodes.length === 0 && <p className="absolute left-6 top-24 text-xs text-muted-foreground">No cards or open questions in this phase yet.</p>}
               <svg className="pointer-events-none absolute inset-0" width={layout.width} height={layout.height} aria-hidden="true">
                 <defs>

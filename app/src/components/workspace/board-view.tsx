@@ -96,14 +96,14 @@ export function BoardView({
     saveViewState(scope, { agentsOpen });
   }, [scope, agentsOpen]);
   const runningAgents = boardAgents(board).filter(isRunning).length;
-  const phase = board.phases.find((item)=>item.id===phaseId) ?? board.phases.find((item)=>item.status==="current") ?? board.phases[0];
+  const phase = board.phases.find((item)=>item.id===phaseId) ?? board.phases.find((item)=>item.id===board.current_phase_id) ?? board.phases[0];
   const [phaseFilter, setPhaseFilter] = useState(() => pickPhaseFilter(loadViewState(scope).phaseFilter, board.phases.map((item) => item.id)));
   const [showCompleted, setShowCompleted] = useState(() => loadViewState(scope).showCompleted ?? false);
   useEffect(() => {
     saveViewState(scope, { phaseFilter, showCompleted });
   }, [scope, phaseFilter, showCompleted]);
-  const visiblePhases = board.phases.filter((item) => showCompleted || item.status !== "closed");
-  const completedCount = board.phases.filter((item) => item.status === "closed").length;
+  const visiblePhases = board.phases.filter((item) => showCompleted || item.status !== "complete");
+  const completedCount = board.phases.filter((item) => item.status === "complete").length;
   const graphControls = (
     <>
       <label className="flex items-center gap-1.5 text-muted-foreground">Phase
@@ -125,7 +125,7 @@ export function BoardView({
       <button className="flex shrink-0 items-center gap-1.5 font-medium text-muted-foreground hover:text-foreground" onClick={onBackToGraph}><ArrowLeft className="size-3.5" />Phase graph</button>
       <span className="flex min-w-0 items-center gap-2">
         <strong className="truncate text-sm" title={phase?.description}>{phase?.name ?? "Phase"}</strong>
-        {phase && <Badge variant="secondary">{phase.status === "closed" ? "Completed" : phase.status === "future" ? "Upcoming" : "Current"}</Badge>}
+        {phase && <Badge variant="secondary">{phase.status === "complete" ? "Completed" : phase.status === "future" ? "Upcoming" : "Current"}</Badge>}
       </span>
     </>
   );

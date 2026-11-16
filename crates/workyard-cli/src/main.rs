@@ -613,9 +613,11 @@ enum PhaseCommand {
         #[arg(long)]
         expected_version: i64,
     },
+    /// Deprecated: phases complete automatically when their last card is Done. Does nothing.
     Complete {
         board: String,
     },
+    /// Deprecated: the current phase is derived from the work. Does nothing.
     Advance {
         board: String,
     },
@@ -960,8 +962,11 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
             PhaseCommand::List { board } => store.list_phases(&board)?,
             PhaseCommand::Add { board, name, description } => store.add_phase_with_description(actor, &board, &name, &description)?,
             PhaseCommand::Describe { board, phase, description, expected_version } => store.describe_phase(actor, &board, &phase, &description, expected_version)?,
-            PhaseCommand::Complete { board } => store.complete_phase(actor, &board)?,
-            PhaseCommand::Advance { board } => store.advance_phase(actor, &board)?,
+            PhaseCommand::Complete { .. } | PhaseCommand::Advance { .. } => {
+                let message = "phases complete automatically when their last card is Done; this command is deprecated and does nothing";
+                eprintln!("{message}");
+                json!({"deprecated":true,"message":message})
+            }
             PhaseCommand::Assign {
                 item,
                 phase,

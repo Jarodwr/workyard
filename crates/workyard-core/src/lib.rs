@@ -194,10 +194,6 @@ impl Store {
         }
         let phase_id = uuid();
         tx.execute("INSERT INTO phases(id,board_id,name,position,created_at) VALUES (?1,?2,'Current work',0,?3)",params![phase_id,id,now])?;
-        tx.execute(
-            "UPDATE boards SET current_phase_id=?2 WHERE id=?1",
-            params![id, phase_id],
-        )?;
         lane_effects.push(json!({"type":"phase_created","phase_id":phase_id,"after":phases::phase_row(&tx,&phase_id)?}));
         let after = board_row(&tx, &id)?;
         record(
@@ -633,6 +629,7 @@ impl Store {
         check_board_active(&tx, &board_id)?;
         let (phase_id, _) = phases::resolve_phase(&tx, &board_id, phase)?;
         phases::ensure_phase_open(&tx, &board_id, &phase_id)?;
+        let phase_before = phases::snapshot(&tx, &board_id)?;
         let lane_id = if let Some(lane) = lane {
             resolve_lane(&tx, &board_id, lane)?
         } else {
@@ -674,7 +671,7 @@ impl Store {
             &id,
             None,
             Some(&after),
-            &[],
+            &phases::transition_effects(&tx, &board_id, &phase_before)?,
             "",
         )?;
         self.commit(tx)?;
@@ -965,6 +962,7 @@ impl Store {
         let before = guard_card(&tx, &id, actor, expected)?;
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
+        let phase_before = phases::snapshot(&tx, board_id)?;
         let to_lane = resolve_lane(&tx, board_id, destination)?;
         let to_kind: String =
             tx.query_row("SELECT kind FROM lanes WHERE id=?1", [&to_lane], |r| {
@@ -1044,8 +1042,9 @@ impl Store {
         }
         renumber(&tx, &target_ids, &to_lane)?;
         let after = card_row(&tx, &id)?;
-        let effects =
+        let mut effects =
             changed_state_effects(&tx, &affected, &old_states, before["key"].as_str().unwrap())?;
+        effects.extend(phases::transition_effects(&tx, board_id, &phase_before)?);
         record(
             &tx,
             actor,
@@ -1365,8 +1364,14 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let board_id = resolve_board(&tx, board)?;
         check_board_active(&tx, &board_id)?;
-        let (phase_id, phase_position) = phases::resolve_phase(&tx, &board_id, phase)?;
-        phases::ensure_phase_open(&tx, &board_id, &phase_id)?;
+        let explicit_phase = match phase {
+            Some(_) => Some(phases::resolve_phase(&tx, &board_id, phase)?),
+            None => None,
+        };
+        let phase_before = phases::snapshot(&tx, &board_id)?;
+        // (unfinished, phase position, phase id) of the blocked cards; the earliest unfinished one
+        // supplies the default phase.
+        let mut blocked_phase: Option<(bool, i64, String)> = None;
         let mut card_ids = Vec::new();
         let mut seen = HashSet::new();
         for card in blocks {
@@ -1390,11 +1395,17 @@ impl Store {
                 [row["phase_id"].as_str().unwrap()],
                 |r| r.get(0),
             )?;
-            if phase_position > card_phase {
+            if explicit_phase.as_ref().is_some_and(|(_, position)| *position > card_phase) {
                 return Err(Error::new(
                     "future_dependency",
                     "a question cannot block a card in an earlier phase",
                 ));
+            }
+            let blocked_lane: String = tx.query_row("SELECT kind FROM lanes WHERE id=?1", [row["lane_id"].as_str().unwrap()], |r| r.get(0))?;
+            let unfinished = blocked_lane != "done";
+            let candidate = (!unfinished, card_phase, row["phase_id"].as_str().unwrap().to_owned());
+            if blocked_phase.as_ref().is_none_or(|(done, position, _)| (candidate.0, candidate.1) < (*done, *position)) {
+                blocked_phase = Some(candidate);
             }
             if let Some(owner) = row["owner_actor"].as_str() {
                 if owner != actor {
@@ -1409,6 +1420,11 @@ impl Store {
             }
             card_ids.push(id);
         }
+        let phase_id = match (explicit_phase, blocked_phase) {
+            (Some((id, _)), _) => id,
+            (None, Some((_, _, id))) => id,
+            (None, None) => phases::current_phase(&tx, &board_id)?.0,
+        };
         let old_states = capture_states(&tx, &card_ids)?;
         let id = uuid();
         let key = next_key(&tx, "question", "Q")?;
@@ -1426,6 +1442,7 @@ impl Store {
         let after = question_row(&tx, &id)?;
         let mut effects = changed_state_effects(&tx, &card_ids, &old_states, &key)?;
         effects.extend(link_effects);
+        effects.extend(phases::transition_effects(&tx, &board_id, &phase_before)?);
         record(
             &tx,
             actor,
@@ -1514,6 +1531,7 @@ impl Store {
         };
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
+        let phase_before = phases::snapshot(&tx, board_id)?;
         let affected = cards_blocked_by_question(&tx, &id)?;
         let old_states = capture_states(&tx, &affected)?;
         let (status, answer, answer_note) = match &outcome {
@@ -1537,6 +1555,7 @@ impl Store {
         for card_id in &affected {
             effects.push(json!({"type":"question_resolved_for_card","card_id":card_id,"question_id":id,"question_key":before["key"]}));
         }
+        effects.extend(phases::transition_effects(&tx, board_id, &phase_before)?);
         record(
             &tx,
             actor,
@@ -1634,7 +1653,7 @@ impl Store {
         }
         let window = phases::phase_window(&db, &board_id)?;
         let current_has_work = phases::current_queue_has_work(&db, &board_id)?;
-        let mut stmt = db.prepare("SELECT c.id,p.position FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id WHERE c.board_id=?1 AND p.position>=?2 AND p.closed_at IS NULL AND l.kind='backlog' AND l.archived=0 AND c.owner_actor IS NULL AND c.cancelled_at IS NULL AND (?3 IS NULL OR c.agent_type=?3) ORDER BY p.position,c.position,c.key")?;
+        let mut stmt = db.prepare("SELECT c.id,p.position FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id WHERE c.board_id=?1 AND p.position>=?2 AND l.kind='backlog' AND l.archived=0 AND c.owner_actor IS NULL AND c.cancelled_at IS NULL AND (?3 IS NULL OR c.agent_type=?3) ORDER BY p.position,c.position,c.key")?;
         let ids = stmt.query_map(params![board_id, current_position, agent_type], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;
@@ -2082,7 +2101,9 @@ fn ensure_work_lane(db: &Connection, lane_id: &str) -> Result<()> {
     }
 }
 fn board_row(db: &Connection, id: &str) -> Result<Value> {
-    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required,phase_window,integration FROM boards WHERE id=?1", [id], |r| Ok(json!({"integration":r.get::<_,String>(11)?,"phase_window":r.get::<_,Option<i64>>(10)?,"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
+    let mut board: Value = db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required,phase_window,integration FROM boards WHERE id=?1", [id], |r| Ok(json!({"integration":r.get::<_,String>(11)?,"phase_window":r.get::<_,Option<i64>>(10)?,"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":Value::Null})))?;
+    board["current_phase_id"] = phases::current_phase(db, id).map_or(Value::Null, |(phase, _)| json!(phase));
+    Ok(board)
 }
 fn card_row(db: &Connection, id: &str) -> Result<Value> {
     Ok(serde_json::to_value(card_snapshot(db, id)?)?)

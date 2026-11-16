@@ -7,11 +7,92 @@ use crate::{
 };
 
 pub(crate) fn phase_row(db: &Connection, id: &str) -> Result<Value> {
-    Ok(db.query_row("SELECT id,board_id,name,position,created_at,description,version,closed_at FROM phases WHERE id=?1", [id], |r| Ok(json!({"id":r.get::<_,String>(0)?,"board_id":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"position":r.get::<_,i64>(3)?,"created_at":r.get::<_,String>(4)?,"description":r.get::<_,String>(5)?,"version":r.get::<_,i64>(6)?,"closed_at":r.get::<_,Option<String>>(7)?})))?)
+    Ok(db.query_row("SELECT id,board_id,name,position,created_at,description,version FROM phases WHERE id=?1", [id], |r| Ok(json!({"id":r.get::<_,String>(0)?,"board_id":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"position":r.get::<_,i64>(3)?,"created_at":r.get::<_,String>(4)?,"description":r.get::<_,String>(5)?,"version":r.get::<_,i64>(6)?})))?)
+}
+
+/// One phase's derived state. Nothing here is stored: it is read from the phase's cards and
+/// questions every time.
+pub(crate) struct PhaseFacts {
+    pub id: String,
+    pub name: String,
+    pub position: i64,
+    pub complete: bool,
+}
+
+/// Every phase of the board in order, with `complete` derived: the phase has at least one item
+/// (a non-cancelled card or a question) and every such card is Done and every question is
+/// answered or dropped.
+pub(crate) fn phase_facts(db: &Connection, board_id: &str) -> Result<Vec<PhaseFacts>> {
+    let mut stmt = db.prepare(
+        "SELECT p.id,p.name,p.position,\
+         (SELECT COUNT(*) FROM cards c WHERE c.phase_id=p.id AND c.cancelled_at IS NULL),\
+         (SELECT COUNT(*) FROM cards c JOIN lanes l ON l.id=c.lane_id WHERE c.phase_id=p.id AND c.cancelled_at IS NULL AND l.kind!='done'),\
+         (SELECT COUNT(*) FROM questions q WHERE q.phase_id=p.id),\
+         (SELECT COUNT(*) FROM questions q WHERE q.phase_id=p.id AND q.status='open') \
+         FROM phases p WHERE p.board_id=?1 ORDER BY p.position",
+    )?;
+    let rows = stmt.query_map([board_id], |r| {
+        let items: i64 = r.get::<_, i64>(3)? + r.get::<_, i64>(5)?;
+        let unfinished: i64 = r.get::<_, i64>(4)? + r.get::<_, i64>(6)?;
+        Ok(PhaseFacts { id: r.get(0)?, name: r.get(1)?, position: r.get(2)?, complete: items > 0 && unfinished == 0 })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Index of the current phase in `phases`: the first one with unfinished work. When nothing is
+/// unfinished it is the first empty phase after the last one with work, else that last phase;
+/// a board with no work at all is at its first phase.
+fn current_index(db: &Connection, board_id: &str, phases: &[PhaseFacts]) -> Result<usize> {
+    let mut stmt = db.prepare(
+        "SELECT p.id FROM phases p WHERE p.board_id=?1 AND (\
+         EXISTS(SELECT 1 FROM cards c JOIN lanes l ON l.id=c.lane_id WHERE c.phase_id=p.id AND c.cancelled_at IS NULL AND l.kind!='done') OR \
+         EXISTS(SELECT 1 FROM questions q WHERE q.phase_id=p.id AND q.status='open')) ORDER BY p.position LIMIT 1",
+    )?;
+    if let Some(id) = stmt.query_row([board_id], |r| r.get::<_, String>(0)).optional()? {
+        return Ok(phases.iter().position(|p| p.id == id).unwrap_or(0));
+    }
+    Ok(match phases.iter().rposition(|p| p.complete) {
+        Some(last) if last + 1 < phases.len() => last + 1,
+        Some(last) => last,
+        None => 0,
+    })
 }
 
 pub(crate) fn current_phase(db: &Connection, board_id: &str) -> Result<(String, i64)> {
-    db.query_row("SELECT p.id,p.position FROM boards b JOIN phases p ON p.id=b.current_phase_id WHERE b.id=?1", [board_id], |r| Ok((r.get(0)?,r.get(1)?))).map_err(Into::into)
+    let phases = phase_facts(db, board_id)?;
+    if phases.is_empty() {
+        return Err(Error::new("not_found", "board has no phases"));
+    }
+    let current = &phases[current_index(db, board_id, &phases)?];
+    Ok((current.id.clone(), current.position))
+}
+
+/// Phase completion before a command, to be compared with the state after it.
+pub(crate) struct PhaseSnapshot(Vec<PhaseFacts>);
+
+pub(crate) fn snapshot(db: &Connection, board_id: &str) -> Result<PhaseSnapshot> {
+    Ok(PhaseSnapshot(phase_facts(db, board_id)?))
+}
+
+/// `phase_completed` / `phase_reopened` effects for the phases whose completeness changed since
+/// `before`, each naming the board's new current phase. Part of the command's event only.
+pub(crate) fn transition_effects(db: &Connection, board_id: &str, before: &PhaseSnapshot) -> Result<Vec<Value>> {
+    let after = phase_facts(db, board_id)?;
+    if after.is_empty() {
+        return Ok(Vec::new());
+    }
+    let current = &after[current_index(db, board_id, &after)?];
+    let mut effects = Vec::new();
+    for phase in &after {
+        let was = before.0.iter().find(|p| p.id == phase.id).is_some_and(|p| p.complete);
+        let kind = match (was, phase.complete) {
+            (false, true) => "phase_completed",
+            (true, false) => "phase_reopened",
+            _ => continue,
+        };
+        effects.push(json!({"type":kind,"phase_id":phase.id,"phase":phase.name,"current_phase_id":current.id,"current_phase":current.name}));
+    }
+    Ok(effects)
 }
 
 pub(crate) fn resolve_phase(
@@ -37,23 +118,18 @@ pub(crate) fn resolve_phase(
     }
 }
 
+/// Phases are never closed; work added to a finished phase reopens it. This only checks that
+/// the phase belongs to the board.
 pub(crate) fn ensure_phase_open(db: &Connection, board_id: &str, phase_id: &str) -> Result<()> {
-    let (_, current) = current_phase(db, board_id)?;
-    let phase: (i64, Option<String>) = db
-        .query_row(
-            "SELECT position,closed_at FROM phases WHERE id=?1 AND board_id=?2",
-            params![phase_id, board_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?
-        .ok_or_else(|| Error::new("not_found", "phase does not belong to this board"))?;
-    if phase.0 < current || phase.1.is_some() {
-        Err(Error::new(
-            "phase_closed",
-            "completed phases cannot receive new work or structural changes",
-        ))
-    } else {
+    let found: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM phases WHERE id=?1 AND board_id=?2)",
+        params![phase_id, board_id],
+        |r| r.get(0),
+    )?;
+    if found {
         Ok(())
+    } else {
+        Err(Error::new("not_found", "phase does not belong to this board"))
     }
 }
 
@@ -116,7 +192,7 @@ pub(crate) fn held_back_by_phase(db: &Connection, board_id: &str) -> Result<Vec<
     let (_, current) = current_phase(db, board_id)?;
     let window = phase_window(db, board_id)?;
     let current_has_work = current_queue_has_work(db, board_id)?;
-    let mut stmt = db.prepare("SELECT c.id,p.position FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id WHERE c.board_id=?1 AND p.position>?2 AND p.closed_at IS NULL AND l.kind='backlog' AND l.archived=0 AND c.owner_actor IS NULL AND c.cancelled_at IS NULL ORDER BY p.position,c.position,c.key")?;
+    let mut stmt = db.prepare("SELECT c.id,p.position FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id WHERE c.board_id=?1 AND p.position>?2 AND l.kind='backlog' AND l.archived=0 AND c.owner_actor IS NULL AND c.cancelled_at IS NULL ORDER BY p.position,c.position,c.key")?;
     let rows = stmt.query_map(params![board_id, current], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
     let mut keys = Vec::new();
     for row in rows {
@@ -143,15 +219,6 @@ pub(crate) fn current_queue_has_work(db: &Connection, board_id: &str) -> Result<
     Ok(false)
 }
 
-fn ensure_phase_complete(db: &Connection, phase_id: &str) -> Result<()> {
-    let unfinished:i64=db.query_row("SELECT COUNT(*) FROM cards c JOIN lanes l ON l.id=c.lane_id WHERE c.phase_id=?1 AND c.cancelled_at IS NULL AND l.kind!='done'",[phase_id],|r|r.get(0))?;
-    let questions:i64=db.query_row("SELECT COUNT(*) FROM questions WHERE phase_id=?1 AND status='open'",[phase_id],|r|r.get(0))?;
-    if unfinished > 0 || questions > 0 {
-        return Err(Error::new("phase_incomplete","finish or cancel current work and resolve its questions before completing the phase").details(json!({"unfinished_cards":unfinished,"open_questions":questions})));
-    }
-    Ok(())
-}
-
 pub(crate) fn ensure_schedulable(db: &Connection, card: &Value) -> Result<()> {
     if card["cancelled_at"].is_string() {
         return Err(Error::new(
@@ -164,23 +231,15 @@ pub(crate) fn ensure_schedulable(db: &Connection, card: &Value) -> Result<()> {
         .as_str()
         .ok_or_else(|| Error::new("database_error", "card has no phase"))?;
     let (_, current) = current_phase(db, board_id)?;
-    let phase: (i64, Option<String>) = db.query_row("SELECT position,closed_at FROM phases WHERE id=?1", [phase_id], |r| {
-        Ok((r.get(0)?, r.get(1)?))
-    })?;
-    if phase.0 < current || phase.1.is_some() {
-        return Err(Error::new(
-            "phase_closed",
-            "card belongs to a completed phase",
-        ));
-    }
+    let phase: i64 = db.query_row("SELECT position FROM phases WHERE id=?1", [phase_id], |r| r.get(0))?;
     let window = phase_window(db, board_id)?;
-    if window.is_some_and(|w| phase.0 > current + w) {
+    if window.is_some_and(|w| phase > current + w) {
         return Err(Error::new(
             "phase_planned",
             "this phase is beyond the board's phase window",
         ));
     }
-    if window == Some(1) && phase.0 == current + 1 && current_queue_has_work(db, board_id)? {
+    if window == Some(1) && phase == current + 1 && current_queue_has_work(db, board_id)? {
         return Err(Error::new(
             "current_phase_queue_not_empty",
             "ready work remains in the current phase",
@@ -217,15 +276,14 @@ impl Store {
     pub fn list_phases(&self, board: &str) -> Result<Value> {
         let db = self.open()?;
         let board_id = resolve_board(&db, board)?;
-        let (_, current) = current_phase(&db, &board_id)?;
-        let mut stmt = db.prepare("SELECT id FROM phases WHERE board_id=?1 ORDER BY position")?;
+        let facts = phase_facts(&db, &board_id)?;
+        let current = if facts.is_empty() { 0 } else { current_index(&db, &board_id, &facts)? };
         let mut result = Vec::new();
-        for id in stmt.query_map([board_id], |r| r.get::<_, String>(0))? {
-            let mut phase = phase_row(&db, &id?)?;
-            let position = phase["position"].as_i64().unwrap();
-            phase["status"] = json!(if position < current || phase["closed_at"].is_string() {
-                "closed"
-            } else if position == current {
+        for (index, fact) in facts.iter().enumerate() {
+            let mut phase = phase_row(&db, &fact.id)?;
+            phase["status"] = json!(if index < current || (index == current && fact.complete) {
+                "complete"
+            } else if index == current {
                 "current"
             } else {
                 "future"
@@ -306,63 +364,6 @@ impl Store {
         Ok(after)
     }
 
-    pub fn complete_phase(&self, actor: &str, board: &str) -> Result<Value> {
-        let mut db = self.open()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let board_id = resolve_board(&tx, board)?;
-        check_board_active(&tx, &board_id)?;
-        let (phase_id, _) = current_phase(&tx, &board_id)?;
-        let before = phase_row(&tx, &phase_id)?;
-        if before["closed_at"].is_string() {
-            return Err(Error::new("phase_closed", "current phase is already completed"));
-        }
-        ensure_phase_complete(&tx, &phase_id)?;
-        tx.execute("UPDATE phases SET closed_at=?2,version=version+1 WHERE id=?1",params![phase_id,now()])?;
-        tx.execute("UPDATE boards SET version=version+1 WHERE id=?1",[&board_id])?;
-        let after=phase_row(&tx,&phase_id)?;
-        record(&tx,actor,"phase_completed",&board_id,"phase",&phase_id,Some(&before),Some(&after),&[json!({"type":"phase_archived","phase_id":phase_id})],"")?;
-        self.commit(tx)?;
-        Ok(after)
-    }
-
-    pub fn advance_phase(&self, actor: &str, board: &str) -> Result<Value> {
-        let mut db = self.open()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let board_id = resolve_board(&tx, board)?;
-        check_board_active(&tx, &board_id)?;
-        let before = board_row(&tx, &board_id)?;
-        let (current_id, current_position) = current_phase(&tx, &board_id)?;
-        let next_id: String = tx
-            .query_row(
-                "SELECT id FROM phases WHERE board_id=?1 AND position=?2",
-                params![board_id, current_position + 1],
-                |r| r.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| Error::new("phase_not_found", "add a next phase before advancing"))?;
-        ensure_phase_complete(&tx, &current_id)?;
-        tx.execute("UPDATE phases SET closed_at=COALESCE(closed_at,?2),version=version+CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END WHERE id=?1",params![current_id,now()])?;
-        tx.execute(
-            "UPDATE boards SET current_phase_id=?2,version=version+1 WHERE id=?1",
-            params![board_id, next_id],
-        )?;
-        let after = board_row(&tx, &board_id)?;
-        record(
-            &tx,
-            actor,
-            "phase_advanced",
-            &board_id,
-            "board",
-            &board_id,
-            Some(&before),
-            Some(&after),
-            &[json!({"type":"phase_archived","phase_id":current_id}),json!({"type":"phase_current_changed","from":current_id,"to":next_id})],
-            "",
-        )?;
-        self.commit(tx)?;
-        Ok(after)
-    }
-
     pub fn assign_phase(
         &self,
         actor: &str,
@@ -393,6 +394,7 @@ impl Store {
         }
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
+        let phase_before = snapshot(&tx, board_id)?;
         let old_phase = before["phase_id"].as_str().unwrap();
         ensure_phase_open(&tx, board_id, old_phase)?;
         let (new_phase, new_position) = resolve_phase(&tx, board_id, Some(phase))?;
@@ -477,7 +479,7 @@ impl Store {
             &id,
             Some(&before),
             Some(&after),
-            &[],
+            &transition_effects(&tx, board_id, &phase_before)?,
             &format!("from phase {old_position} to {new_position}"),
         )?;
         self.commit(tx)?;
@@ -500,6 +502,7 @@ impl Store {
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
         ensure_phase_open(&tx, board_id, before["phase_id"].as_str().unwrap())?;
+        let phase_before = snapshot(&tx, board_id)?;
         if before["cancelled_at"].is_string() {
             return Err(Error::new("card_cancelled", "card is already cancelled"));
         }
@@ -524,6 +527,7 @@ impl Store {
         for dependent in affected {
             effects.push(json!({"type":"prerequisite_cancelled","card_id":dependent,"prerequisite_id":id,"owner_actor":old[&dependent]["owner_actor"]}));
         }
+        effects.extend(transition_effects(&tx, board_id, &phase_before)?);
         record(
             &tx,
             actor,

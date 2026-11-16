@@ -89,7 +89,7 @@ The Rust core exposes typed `Card` and `Question` snapshots, distinct board/card
 | `id_counters` | type and next human-readable number; increments in the same transaction as creation |
 | `projects`, `project_repositories`, `project_documents`, `project_stakeholders` | Added in migration 7. A board has an optional `project_id`; a question has an optional `stakeholder_id`. See [PROJECTS.md](PROJECTS.md) |
 | `card_changes` | Added in migration 7. Linked repository, working and target branch, `commit_oid`, `review_required`, `approved_commit_oid`, `reviewer`, `version`. A new commit clears approval |
-| `phases` | Added in migrations 8 and 9. Ordered per board with a unique name, description, `version`, and `closed_at`; `boards.current_phase_id` points at the current one; `cards` and `questions` carry `phase_id`. See ADR 0001 |
+| `phases` | Added in migrations 8 and 9. Ordered per board with a unique name, description, and `version`. `phases.closed_at` and `boards.current_phase_id` are no longer read or written (the columns stay for old databases); phase status is derived, see ADR 0001 addendum; `cards` and `questions` carry `phase_id`. See ADR 0001 |
 | `orchestrator_sessions` | Added in migrations 11 and 12. One row per board: `desired_state` (`running`, `paused`, `draining`), event `cursor`, `pool_size`, the lease (`holder`, `host`, `pid`, `epoch`, `heartbeat_at`, `lease_expires_at`), and `backoff_until`/`backoff_reason`. See [ORCHESTRATOR.md](ORCHESTRATOR.md) |
 | `cards.workspace`, `task_sessions.held_by` | Added in migration 13. `workspace` is `worktree` (default) or `none`; `held_by` names a human who has taken a session over |
 | `dependencies.scope` | Added in migration 7: `start` (default) or `finish` |
@@ -253,7 +253,7 @@ workyard task require-review <change> --required true|false
 # plan: project and board structure
 workyard plan create-project|create-board|attach-board|add-repository|add-document|add-stakeholder
 workyard plan assign-stakeholder|unassign-stakeholder <Q-3> ...
-workyard plan phase list|add|describe|complete|advance|assign
+workyard plan phase list|add|describe|assign   (complete and advance are deprecated no-ops)
 workyard plan cancel <C-1> --reason "..."
 
 # orch: orchestrator and operator

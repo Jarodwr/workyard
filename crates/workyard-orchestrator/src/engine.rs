@@ -727,6 +727,19 @@ impl<'a> Orchestrator<'a> {
     }
 
     fn handle_event(&mut self, actor: &str, event: &Value) {
+        for effect in event["effects"].as_array().into_iter().flatten() {
+            let phase = effect["phase"].as_str().unwrap_or("?");
+            let next = effect["current_phase"].as_str().unwrap_or("?");
+            match effect["type"].as_str() {
+                Some("phase_completed") => {
+                    self.notifier.notify("Workyard", &format!("Phase {phase} finished, {next} is next"));
+                }
+                Some("phase_reopened") => {
+                    self.notifier.notify("Workyard", &format!("Phase {phase} reopened, {next} is current"));
+                }
+                _ => {}
+            }
+        }
         let after = &event["after"];
         let entity = event["entity_id"].as_str().unwrap_or_default();
         match event["type"].as_str().unwrap_or_default() {

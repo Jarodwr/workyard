@@ -30,3 +30,15 @@ All creation, assignment, claim, move, dependency, and advance checks run inside
 ## Consequences
 
 The current phase expresses the board's intended sequence without fabricating card dependencies. The next-phase allowance improves utilization, but it is intentionally limited to one phase ahead and only when the current phase has no claimable ready Backlog work. Scheduling eligibility is distinct from a card's dependency-derived blocked state.
+
+## Addendum: phase status is derived
+
+Nothing about a phase being finished is stored, and nobody marks it.
+
+- A phase is `complete` when it has at least one item and every non-cancelled card in it is Done and every question in it is answered or dropped.
+- The board's current phase is the first phase by position with unfinished work. When nothing is unfinished it is the first empty phase after the last phase with work, else that last phase; a board with no work is at its first phase. Phases before it are `complete`, phases after it are `future`.
+- Adding a card or question to a complete phase, or moving a card out of Done, reopens it and moves the current phase back. Nothing is closed, so the `phase_closed` refusal is gone.
+- Dispatch, the phase window, the defaults of `task add-card` and `task ask`, and the board read's `current_phase_id` and each phase's `status` all use this derived phase. A question with `--blocks` takes the phase of the earliest unfinished blocked card unless `--phase` is given; with no blocked card it takes the current phase.
+- `phases.closed_at` and `boards.current_phase_id` are neither read nor written; existing databases read correctly from their cards.
+- `plan phase complete` and `plan phase advance` are **deprecated**: they print that phases complete automatically and exit 0.
+- A command that completes or reopens a phase adds `phase_completed` or `phase_reopened` effects (phase, current phase) to its event; the orchestrator notifies once ("Phase X finished, Y is next").

@@ -471,9 +471,9 @@ fn later_phase_work_is_offered_after_current_but_never_before() {
             .create_card_in_phase("agent", &board, title, "", "P2", None, "", phase)
             .unwrap()
     };
+    let current = mk("Current task", Some("Current work"));
     let third = mk("Third task", Some("Third"));
     let second = mk("Second task", Some("Second"));
-    let current = mk("Current task", None);
     assert_eq!(store.orchestrator_status(&board).unwrap()["held_back_by_phase"], 0);
     assert_eq!(store.next_ready_task(&board, None).unwrap()["key"], current["key"]);
     store.claim_card("agent", current["key"].as_str().unwrap(), 1).unwrap();
@@ -622,29 +622,10 @@ fn cancelled_prerequisite_stops_blocking_and_stays_visible() {
     assert_eq!(view["blockers"].as_array().unwrap().len(), 0);
     assert_eq!(view["cancelled_prerequisites"][0]["key"], obs);
     assert_eq!(view["cancelled_prerequisites"][0]["cancelled"], true);
-    // The phase can close without repairing the link.
-    let board_after = store.advance_phase("agent", &board).unwrap();
-    assert_eq!(
-        board_after["current_phase_id"],
-        store.list_phases(&board).unwrap()[1]["id"]
-    );
-    assert!(store.list_phases(&board).unwrap()[0]["closed_at"].is_string());
-    assert_eq!(
-        store
-            .create_card_in_phase(
-                "agent",
-                &board,
-                "Too late",
-                "",
-                "P2",
-                None,
-                "",
-                Some("Current work")
-            )
-            .unwrap_err()
-            .code,
-        "phase_closed"
-    );
+    // The phase completes without repairing the link: cancelled cards do not hold it open.
+    let phases = store.list_phases(&board).unwrap();
+    assert_eq!(phases[0]["status"], "complete");
+    assert_eq!(store.view_board(&board).unwrap()["current_phase_id"], phases[1]["id"]);
     assert_eq!(
         store
             .claim_card("agent", obsolete["key"].as_str().unwrap(), 2)
@@ -655,7 +636,7 @@ fn cancelled_prerequisite_stops_blocking_and_stays_visible() {
 }
 
 #[test]
-fn phase_description_and_explicit_final_completion() {
+fn phase_description_and_derived_completion() {
     let (_dir, store, board) = setup();
     let described = store
         .describe_phase("agent", &board, "Current work", "Build the command foundation", 1)
@@ -667,20 +648,87 @@ fn phase_description_and_explicit_final_completion() {
             .unwrap_err().code,
         "version_conflict"
     );
-    let card = store.create_card("agent", &board, "Finish setup", "", "P2", None).unwrap();
-    let before_failed = store.latest_event_id().unwrap();
-    assert_eq!(store.complete_phase("agent", &board).unwrap_err().code, "phase_incomplete");
-    assert_eq!(store.latest_event_id().unwrap(), before_failed);
-    store.move_card("agent", card["key"].as_str().unwrap(), "Done", None, 1).unwrap();
-    let before_completed = store.latest_event_id().unwrap();
-    let completed = store.complete_phase("agent", &board).unwrap();
-    assert_eq!(store.latest_event_id().unwrap(), before_completed + 1);
-    assert!(completed["closed_at"].is_string());
-    assert_eq!(store.list_phases(&board).unwrap()[0]["status"], "closed");
-    assert_eq!(store.create_card("agent", &board, "Too late", "", "P2", None).unwrap_err().code, "phase_closed");
     store.add_phase_with_description("agent", &board, "Next", "New phase goal").unwrap();
-    store.advance_phase("agent", &board).unwrap();
-    assert_eq!(store.list_phases(&board).unwrap()[1]["status"], "current");
+    // A fresh board: the first phase is current, an empty phase is never complete.
+    let phases = store.list_phases(&board).unwrap();
+    assert_eq!((phases[0]["status"].as_str(), phases[1]["status"].as_str()), (Some("current"), Some("future")));
+    let card = store.create_card("agent", &board, "Finish setup", "", "P2", None).unwrap();
+    assert_eq!(store.list_phases(&board).unwrap()[0]["status"], "current");
+    let before = store.latest_event_id().unwrap();
+    store.move_card("agent", card["key"].as_str().unwrap(), "Done", None, 1).unwrap();
+    let phases = store.list_phases(&board).unwrap();
+    assert_eq!((phases[0]["status"].as_str(), phases[1]["status"].as_str()), (Some("complete"), Some("current")));
+    assert_eq!(store.view_board(&board).unwrap()["current_phase_id"], phases[1]["id"]);
+    let events = store.poll_events(before, 10).unwrap();
+    let effects = events["events"][0]["effects"].as_array().unwrap();
+    let done = effects.iter().find(|e| e["type"] == "phase_completed").unwrap();
+    assert_eq!((done["phase"].as_str(), done["current_phase"].as_str()), (Some("Current work"), Some("Next")));
+    // Work added to the complete phase reopens it and moves current back.
+    let before = store.latest_event_id().unwrap();
+    store.create_card_in_phase("agent", &board, "Late", "", "P2", None, "", Some("Current work")).unwrap();
+    let phases = store.list_phases(&board).unwrap();
+    assert_eq!((phases[0]["status"].as_str(), phases[1]["status"].as_str()), (Some("current"), Some("future")));
+    let events = store.poll_events(before, 10).unwrap();
+    let effects = events["events"][0]["effects"].as_array().unwrap();
+    assert!(effects.iter().any(|e| e["type"] == "phase_reopened" && e["phase"] == "Current work"));
+}
+
+#[test]
+fn last_phase_complete_stays_current_and_cancelled_cards_do_not_count() {
+    let (_dir, store, board) = setup();
+    let only = store.create_card("agent", &board, "Only", "", "P2", None).unwrap();
+    let dropped = store.create_card("agent", &board, "Dropped", "", "P2", None).unwrap();
+    store.cancel_card("agent", dropped["key"].as_str().unwrap(), "no", 1).unwrap();
+    assert_eq!(store.list_phases(&board).unwrap()[0]["status"], "current");
+    store.move_card("agent", only["key"].as_str().unwrap(), "Done", None, 1).unwrap();
+    let phases = store.list_phases(&board).unwrap();
+    assert_eq!(phases[0]["status"], "complete");
+    assert_eq!(store.view_board(&board).unwrap()["current_phase_id"], phases[0]["id"]);
+}
+
+#[test]
+fn open_questions_hold_a_phase_and_default_to_the_blocked_cards_phase() {
+    let (_dir, store, board) = setup();
+    store.add_phase("agent", &board, "Next").unwrap();
+    let card = store.create_card("agent", &board, "Work", "", "P2", None).unwrap();
+    let later = store
+        .create_card_in_phase("agent", &board, "Later", "", "P2", None, "", Some("Next"))
+        .unwrap();
+    store.move_card("agent", card["key"].as_str().unwrap(), "Done", None, 1).unwrap();
+    assert_eq!(store.list_phases(&board).unwrap()[0]["status"], "complete");
+    // A question blocking a later-phase card lands in that card's phase.
+    let q = store
+        .raise_question("agent", &board, "engineering", "Which?", "", &["A".into(), "B".into()], "A", "simple", &[later["key"].as_str().unwrap().to_owned()])
+        .unwrap();
+    assert_eq!(q["phase_id"], later["phase_id"]);
+    // An unblocking question with no phase takes the derived current phase; it holds it open.
+    let free = store
+        .raise_question("agent", &board, "engineering", "Free?", "", &["A".into(), "B".into()], "A", "simple", &[])
+        .unwrap();
+    assert_eq!(free["phase_id"], later["phase_id"]);
+    let explicit = store
+        .raise_question_in_phase("agent", &board, "engineering", "Back?", "", &["A".into(), "B".into()], "A", "simple", &[], Some("Current work"))
+        .unwrap();
+    assert_eq!(store.list_phases(&board).unwrap()[0]["status"], "current");
+    store.resolve_question("ui", explicit["key"].as_str().unwrap(), "A", None, 1, false).unwrap();
+    assert_eq!(store.list_phases(&board).unwrap()[0]["status"], "complete");
+}
+
+#[test]
+fn old_databases_with_closed_phases_derive_from_their_cards() {
+    let (_dir, store, board) = setup();
+    store.add_phase("agent", &board, "Next").unwrap();
+    let card = store.create_card("agent", &board, "Work", "", "P2", None).unwrap();
+    let phases = store.list_phases(&board).unwrap();
+    // The old columns say the first phase is closed and the second current, but a card is open.
+    let db = store.open().unwrap();
+    db.execute("UPDATE phases SET closed_at='2026-01-01' WHERE id=?1", [phases[0]["id"].as_str().unwrap()]).unwrap();
+    db.execute("UPDATE boards SET current_phase_id=?1", [phases[1]["id"].as_str().unwrap()]).unwrap();
+    drop(db);
+    let after = store.list_phases(&board).unwrap();
+    assert_eq!(after[0]["status"], "current");
+    assert_eq!(store.view_board(&board).unwrap()["current_phase_id"], after[0]["id"]);
+    store.claim_card("agent", card["key"].as_str().unwrap(), 1).unwrap();
 }
 
 #[test]
@@ -739,10 +787,6 @@ fn open_questions_hold_phase_and_question_assignment_preserves_dependency_order(
     store
         .move_card("agent", card["key"].as_str().unwrap(), "Done", None, 1)
         .unwrap();
-    assert_eq!(
-        store.advance_phase("agent", &board).unwrap_err().code,
-        "phase_incomplete"
-    );
     let future = store
         .create_card_in_phase("agent", &board, "Future", "", "P2", None, "", Some("Next"))
         .unwrap();
@@ -757,14 +801,9 @@ fn open_questions_hold_phase_and_question_assignment_preserves_dependency_order(
     store
         .resolve_question("ui", question["key"].as_str().unwrap(), "A", None, 1, false)
         .unwrap();
-    store.advance_phase("agent", &board).unwrap();
-    assert_eq!(
-        store
-            .assign_phase("agent", question["key"].as_str().unwrap(), "Next", 2)
-            .unwrap_err()
-            .code,
-        "phase_closed"
-    );
+    store
+        .assign_phase("agent", question["key"].as_str().unwrap(), "Next", 2)
+        .unwrap();
 }
 
 #[test]
