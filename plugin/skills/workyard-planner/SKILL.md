@@ -22,7 +22,7 @@ Run `workyard --json projects`, `boards`, and `board <B-1>` for anything related
 - One board per epic: `plan create-board "Name"`, then `plan attach-board <B-1> <project> --expected-version N`.
 - Phases are the delivery order, not milestones. `plan phase add <B-1> "Name" --description "..."`. Work is done in the current phase first; a card can depend only on the same or an earlier phase.
 - One card is one worker session: small enough to finish and review in one sitting, with a description that states what done means. Split anything bigger.
-- `task add-card <B-1> "Title" --desc "..." --phase "Name" --agent-type Frontend`. Cards get their own git worktree by default. Add `--workspace none` for investigations, research, and decisions that change no repository.
+- `task add-card <B-1> "Title" --desc "..." --phase "Name" --agent-type Frontend`. Cards get their own git worktree by default. Add `--workspace none` for investigations, research, and decisions that change no repository; tell the worker to deliver the findings as a markdown report with `task report <card> --file report.md` rather than a long note.
 - Keep cards from overlapping. Cards run in parallel, and in an earlier sample one card built what another was meant to build.
   - Give every card a distinct set of files or behaviour. Before adding a card, check that no other card already covers it.
   - State the files it owns in the description ("Owns: `crates/workyard-core/src/export.rs`, `docs/EXPORT.md`"), and say which files it must not touch.

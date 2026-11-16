@@ -97,11 +97,55 @@ fn lease_live(row: &Value, host: &str) -> bool {
     }
 }
 
+/// Refuse a migration while a live orchestrator that an older schema started holds a board,
+/// since its workers would fail with `schema_too_new` as soon as the database moved on.
+pub(crate) fn check_migration_allowed(db: &Connection, version: i64) -> Result<()> {
+    if version < 11 {
+        return Ok(());
+    }
+    // The lease records its binary's schema from schema 18; an older lease row has none.
+    let versions = if version >= 18 { "schema_version,binary_version" } else { "NULL,NULL" };
+    let sql = format!(
+        "SELECT b.key,s.holder,s.host,s.pid,s.lease_expires_at,{versions} FROM orchestrator_sessions s JOIN boards b ON b.id=s.board_id WHERE s.holder IS NOT NULL"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            json!({"holder": r.get::<_, String>(1)?, "host": r.get::<_, Option<String>>(2)?, "pid": r.get::<_, Option<i64>>(3)?, "lease_expires_at": r.get::<_, Option<String>>(4)?}),
+            r.get::<_, Option<i64>>(5)?,
+            r.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+    for row in rows {
+        let (board, lease, schema, binary) = row?;
+        if !lease_live(&lease, lease["host"].as_str().unwrap_or("")) || schema.is_some_and(|s| s >= crate::SCHEMA_VERSION) {
+            continue;
+        }
+        let holder = lease["holder"].as_str().unwrap_or("unknown");
+        let which = match (&binary, schema) {
+            (Some(b), Some(s)) => format!("binary {b}, schema {s}"),
+            (_, Some(s)) => format!("schema {s}"),
+            _ => "an older binary that did not record its version".into(),
+        };
+        return Err(Error::new(
+            "migration_blocked",
+            format!(
+                "this binary would migrate the database from schema {version} to {}, but board {board} has a running orchestrator ({holder}, {which}) whose workers would fail with schema_too_new",
+                crate::SCHEMA_VERSION
+            ),
+        )
+        .hint(format!("Stop it first: `workyard orch drain {board}`, wait for workers to pause, then stop the orchestrator (Ctrl-C) or run `workyard orch restart {board}` from the new binary. To migrate anyway, pass --allow-migrate or set WORKYARD_ALLOW_MIGRATE=1"))
+        .details(json!({"board": board, "holder": holder, "pid": lease["pid"], "host": lease["host"], "lease_schema_version": schema, "lease_binary_version": binary, "database_schema_version": version, "binary_schema_version": crate::SCHEMA_VERSION})));
+    }
+    Ok(())
+}
+
 fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
     let key: String = db.query_row("SELECT key FROM boards WHERE id=?1", [board_id], |r| r.get(0))?;
     let row = db
         .query_row(
-            "SELECT desired_state,cursor,pool_size,holder,host,pid,epoch,heartbeat_at,lease_expires_at,backoff_until,backoff_reason,permissions FROM orchestrator_sessions WHERE board_id=?1",
+            "SELECT desired_state,cursor,pool_size,holder,host,pid,epoch,heartbeat_at,lease_expires_at,backoff_until,backoff_reason,permissions,binary_version,schema_version FROM orchestrator_sessions WHERE board_id=?1",
             [board_id],
             |r| {
                 Ok(json!({
@@ -113,12 +157,14 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
                     "backoff_until": r.get::<_, Option<String>>(9)?,
                     "backoff_reason": r.get::<_, String>(10)?,
                     "permissions": r.get::<_, String>(11)?,
+                    "binary_version": r.get::<_, Option<String>>(12)?,
+                    "schema_version": r.get::<_, Option<i64>>(13)?,
                 }))
             },
         )
         .optional()?
         .unwrap_or_else(|| {
-            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"backoff_until":null,"backoff_reason":"","permissions":"full"})
+            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"binary_version":null,"schema_version":null,"backoff_until":null,"backoff_reason":"","permissions":"full"})
         });
     let mut row = row;
     let epoch = row["epoch"].as_i64().unwrap_or(0);
@@ -151,6 +197,13 @@ fn active_workers(db: &Connection, board_id: &str) -> Result<i64> {
 }
 
 impl Store {
+    /// Workers on the board that are attached and not paused (running, or about to).
+    pub fn orchestrator_active_workers(&self, board: &str) -> Result<i64> {
+        let db = self.open()?;
+        let board_id = resolve_board(&db, board)?;
+        active_workers(&db, &board_id)
+    }
+
     pub fn orchestrator_status(&self, board: &str) -> Result<Value> {
         let db = self.open()?;
         let board_id = resolve_board(&db, board)?;
@@ -198,8 +251,8 @@ impl Store {
         let epoch = before["epoch"].as_i64().unwrap_or(0) + 1;
         let expires = (Utc::now() + Duration::seconds(lease_seconds)).to_rfc3339();
         tx.execute(
-            "UPDATE orchestrator_sessions SET holder=?2,host=?3,pid=?4,epoch=?5,heartbeat_at=?6,lease_expires_at=?7,pool_size=COALESCE(?8,pool_size),updated_at=?6 WHERE board_id=?1",
-            params![board_id, holder.trim(), host, pid, epoch, now(), expires, pool_size],
+            "UPDATE orchestrator_sessions SET holder=?2,host=?3,pid=?4,epoch=?5,heartbeat_at=?6,lease_expires_at=?7,pool_size=COALESCE(?8,pool_size),updated_at=?6,binary_version=?9,schema_version=?10 WHERE board_id=?1",
+            params![board_id, holder.trim(), host, pid, epoch, now(), expires, pool_size, env!("CARGO_PKG_VERSION"), crate::SCHEMA_VERSION],
         )?;
         let after = session_row(&tx, &board_id)?;
         let actor = after["actor"].as_str().unwrap().to_owned();
@@ -235,13 +288,13 @@ impl Store {
         let before = session_row(&tx, &board_id)?;
         // Record while the lease is still held: `record` fences on it.
         let mut preview = before.clone();
-        for field in ["holder", "host", "pid", "heartbeat_at", "lease_expires_at", "actor"] {
+        for field in ["holder", "host", "pid", "heartbeat_at", "lease_expires_at", "actor", "binary_version", "schema_version"] {
             preview[field] = Value::Null;
         }
         preview["connected"] = json!(false);
         record(&tx, actor, "orchestrator_released", &board_id, "orchestrator", &board_id, Some(&before), Some(&preview), &[], "")?;
         tx.execute(
-            "UPDATE orchestrator_sessions SET holder=NULL,host=NULL,pid=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=?2 WHERE board_id=?1",
+            "UPDATE orchestrator_sessions SET holder=NULL,host=NULL,pid=NULL,lease_expires_at=NULL,heartbeat_at=NULL,binary_version=NULL,schema_version=NULL,updated_at=?2 WHERE board_id=?1",
             params![board_id, now()],
         )?;
         let after = session_row(&tx, &board_id)?;

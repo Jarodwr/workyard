@@ -21,9 +21,10 @@ import { TabList, TabPanel, type TabItem } from "@/components/ui/tabs";
 import { agentState } from "@/lib/agents";
 import { initialTab, nextTab, tabBadges, type CardTab } from "@/lib/card-tabs";
 import { cn } from "@/lib/utils";
+import { Markdown } from "@/components/workspace/markdown";
 
 const PREFIX = "card-detail";
-const TAB_LABELS: Record<CardTab, string> = { overview: "Overview", activity: "Activity", history: "History", code: "Code", links: "Links" };
+const TAB_LABELS: Record<CardTab, string> = { overview: "Overview", activity: "Activity", history: "History", code: "Code", links: "Links", report: "Report" };
 /** Last tab chosen per card, kept for the session. */
 const rememberedTabs = new Map<string, CardTab>();
 
@@ -318,6 +319,17 @@ export function CardDetail({
                     </p>
                   ))}
                 </section>
+              )}
+            </TabPanel>
+
+            <TabPanel prefix={PREFIX} id="report" active={tab === "report"}>
+              {detail?.report ? (
+                <section className="space-y-2">
+                  <Markdown source={detail.report.body} />
+                  <p className="text-xs text-muted-foreground">{detail.report.actor} · {new Date(detail.report.updated_at).toLocaleString()} · revision {detail.report.version}</p>
+                </section>
+              ) : (
+                <p className="text-xs text-muted-foreground">No report yet. An agent attaches one with <code className="font-mono">workyard task report {card.key} --file report.md</code>.</p>
               )}
             </TabPanel>
 
