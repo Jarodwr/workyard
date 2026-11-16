@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard } from "@/components/ui/card";
 import { StakeholderPicker } from "@/components/workspace/question-card";
+import { QuestionThread, UnreadReplyBadge } from "@/components/workspace/question-thread";
 import {
   buildPhaseDependencyLayout, graphFrame, GRAPH_NODE_HEIGHT, GRAPH_ZOOM_LEVELS, GRAPH_NODE_WIDTH, questionOnlyBlockerCounts, routeDependencyEdges,
   traceDependencies, type GraphEdgeInput, type GraphNodeInput,
@@ -227,6 +228,7 @@ export function DependencyView({
                             {agent.chip}
                           </span>
                         )}
+                        {question && <UnreadReplyBadge question={question} className="ml-auto" />}
                         {node.chokepoint && <Badge variant="outline" className={cn(agent ? "" : "ml-auto", "border-violet-500/30 bg-violet-500/10 px-1 py-0 text-[9px] text-violet-700 dark:text-violet-300")}><GitFork className="size-3" />Holds {node.impact}</Badge>}
                       </span>
                       <strong className={cn("mt-1 line-clamp-2 w-full text-xs leading-4", node.cancelled && "line-through")}>{node.title}</strong>
@@ -261,13 +263,14 @@ export function DependencyView({
         </div>
       </div>
       {answering && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={(event)=>{if(event.target===event.currentTarget)setAnsweringId(null);}}>
-        <div role="dialog" aria-modal="true" aria-label={`Answer ${answering.title}`} className="w-full max-w-lg rounded-xl border bg-background p-5 shadow-xl">
+        <div role="dialog" aria-modal="true" aria-label={`Answer ${answering.title}`} className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border bg-background p-5 shadow-xl">
           <div className="flex items-start justify-between gap-3"><div className="min-w-0 flex-1"><p className="text-xs capitalize text-muted-foreground">{answering.kind} question</p><h2 className="mt-1 text-base font-semibold">{answering.title}</h2></div><StakeholderPicker question={answering} stakeholders={stakeholders} onAssign={(stakeholderId)=>onAssignStakeholder(answering,stakeholderId)} /><Button variant="ghost" size="icon" aria-label="Close answer dialog" onClick={()=>setAnsweringId(null)}><X className="size-4" /></Button></div>
           {answering.body && <p className="mt-2 text-sm text-muted-foreground">{answering.body}</p>}
           {answering.recommended_option && <p className="mt-3 rounded-md border bg-muted/30 p-2 text-xs"><strong>Agent recommends: {answering.recommended_option}</strong>{answering.recommendation_reason && <span className="block text-muted-foreground">{answering.recommendation_reason}</span>}</p>}
           <fieldset className="mt-4 space-y-2"><legend className="mb-2 text-xs font-medium">Choose an option</legend>{answering.options.map((option)=><label key={option} className="flex cursor-pointer items-center gap-2 rounded-md border p-2 text-sm"><input type="radio" name="graph-answer" checked={answer===option} onChange={()=>setAnswer(option)} />{option}</label>)}</fieldset>
           <textarea aria-label="Answer explanation" className="mt-3 w-full rounded-md border bg-background p-2 text-sm" rows={2} placeholder={answer==="Other" ? "Describe your answer…" : "Optional explanation…"} value={answerNote} onChange={(event)=>setAnswerNote(event.target.value)} />
           <div className="mt-3 flex justify-end"><Button size="sm" disabled={!answering.options.includes(answer) || (answer==="Other" && !answerNote.trim())} onClick={async()=>{if(await onAnswer(answering,answer,answerNote.trim()))setAnsweringId(null);}}>Answer question</Button></div>
+          <div className="mt-4"><QuestionThread question={answering} /></div>
         </div>
       </div>}
     </div>

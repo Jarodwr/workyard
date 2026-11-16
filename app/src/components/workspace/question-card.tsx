@@ -4,6 +4,7 @@ import type { Project, Question } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { QuestionThread, UnreadReplyBadge } from "@/components/workspace/question-thread";
 import { cn } from "@/lib/utils";
 
 export function QuestionCard({
@@ -32,7 +33,7 @@ export function QuestionCard({
     <Card id={`question-${question.id}`} className={cn("rounded-xl border-l-4 shadow-none", tone.card)}>
       <CardHeader className="flex flex-row items-start gap-3 pb-3">
         <div className="min-w-0 flex-1 space-y-1">
-          {phaseName && <span className="text-[10px] font-medium text-muted-foreground">{phaseName}</span>}
+          {(phaseName || (question.unread_messages ?? 0) > 0) && <div className="flex items-center gap-2">{phaseName && <span className="text-[10px] font-medium text-muted-foreground">{phaseName}</span>}<UnreadReplyBadge question={question} /></div>}
           <CardTitle className="text-base leading-snug">{question.title}</CardTitle>
           {question.body && <CardDescription>{question.body}</CardDescription>}
         </div>
@@ -75,6 +76,7 @@ export function QuestionCard({
             Answer
           </Button>
         </div>
+        <QuestionThread question={question} collapsible />
       </CardContent>
     </Card>
   );

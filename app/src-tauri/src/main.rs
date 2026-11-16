@@ -75,6 +75,20 @@ fn answer_question(
         false,
     ))
 }
+/// Post to a question's thread as the human at the desktop; it wakes a worker paused on it.
+#[tauri::command]
+fn discuss_question(question: String, body: String) -> Result<Value, String> {
+    wrap(store()?.post_question_message("ui", &question, &body))
+}
+#[tauri::command]
+fn question_thread(question: String) -> Result<Value, String> {
+    wrap(store()?.list_question_messages(&question))
+}
+/// The human has looked at the thread: clear its unread agent replies.
+#[tauri::command]
+fn mark_question_read(question: String) -> Result<i64, String> {
+    store()?.mark_question_messages_read(&question).map_err(|e| e.to_string())
+}
 #[tauri::command]
 fn assign_question_stakeholder(question: String, stakeholder: String, expected_version: i64) -> Result<Value, String> {
     wrap(store()?.assign_question_stakeholder("ui", &question, &stakeholder, expected_version))
@@ -673,6 +687,9 @@ fn main() {
             poll_events,
             list_questions,
             answer_question,
+            discuss_question,
+            question_thread,
+            mark_question_read,
             assign_question_stakeholder,
             unassign_question_stakeholder,
             approve_change,

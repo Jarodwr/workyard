@@ -65,7 +65,8 @@ export type BoardListItem = Omit<Board, "lanes" | "phases"> & { lanes: { lane_id
 export type EventEffect = { type: string; card_id?: string; card_key?: string; cause_key?: string };
 export type BoardEvent = { id: number; type: string; board_id: string | null; entity_type: string; entity_id: string; effects: EventEffect[] };
 export type EventPage = { events: BoardEvent[]; cursor: number; has_more: boolean };
-export type Question = { id: string; key: string; board_id: string; phase_id: string; stakeholder_id?: string | null; stakeholder?: { name: string; role: string; contact: string }; kind: "engineering" | "business"; title: string; body: string; options: string[]; recommended_option: string; recommendation_reason: string; status: string; answer: string; answer_note: string; version: number; blocks: string[] };
+export type Question = { id: string; key: string; board_id: string; phase_id: string; stakeholder_id?: string | null; stakeholder?: { name: string; role: string; contact: string }; kind: "engineering" | "business"; title: string; body: string; options: string[]; recommended_option: string; recommendation_reason: string; status: string; answer: string; answer_note: string; version: number; blocks: string[]; message_count?: number; unread_messages?: number };
+export type QuestionMessage = { id: string; question_id: string; question_key: string; author: string; author_is_human: boolean; body: string; created_at: string; read_by_human: boolean };
 export type Dependency = { id: string; from_card_id: string; to_card_id: string | null; to_question_id: string | null; scope?: "start" | "finish" };
 export type CardChange = { id: string; version: number; repository_id: string; working_branch: string; target_branch: string; commit_oid: string; review_required: boolean; approved_commit_oid: string | null; reviewer: string | null };
 export type Orchestrator = { board_key: string; desired_state: "running" | "paused" | "draining"; pool_size: number; connected: boolean; holder: string | null; epoch: number; heartbeat_at: string | null; backing_off: boolean; backoff_until: string | null; backoff_reason: string; permissions?: "full" | "safe" };
@@ -91,6 +92,9 @@ export const api = {
   pollEvents: (since: number, limit = 100) => invoke<EventPage>("poll_events", { since, limit }),
   listQuestions: () => invoke<Question[]>("list_questions"),
   answerQuestion: (question: Question, answer: string, note: string) => invoke<Question>("answer_question", { question: question.key, answer, note, expectedVersion: question.version }),
+  discussQuestion: (question: string, body: string) => invoke<QuestionMessage>("discuss_question", { question, body }),
+  questionThread: (question: string) => invoke<QuestionMessage[]>("question_thread", { question }),
+  markQuestionRead: (question: string) => invoke<number>("mark_question_read", { question }),
   assignQuestionStakeholder: (question: Question, stakeholder: string) => invoke<Question>("assign_question_stakeholder", { question: question.key, stakeholder, expectedVersion: question.version }),
   unassignQuestionStakeholder: (question: Question) => invoke<Question>("unassign_question_stakeholder", { question: question.key, expectedVersion: question.version }),
   openInTerminal: (card: string) => invoke<TaskSession>("open_in_terminal", { card }),
@@ -156,6 +160,7 @@ let demoQuestions: Question[] = [
 ];
 let demoDependencies: Dependency[] = [{id:"demo-dep-1",from_card_id:"demo-2",to_card_id:"demo-1",to_question_id:null,scope:"finish"}];
 let demoNotes: CardNote[] = [];
+let demoMessages: QuestionMessage[] = [];
 let demoOrchestrator: Orchestrator = { board_key: "B-1", desired_state: "running", pool_size: 2, connected: true, holder: "cli:demo", epoch: 1, heartbeat_at: null, backing_off: false, backoff_until: null, backoff_reason: "", permissions: "full" };
 const clone = <T,>(value: T): T => structuredClone(value);
 function demoFindCard(id: string): Card {
@@ -251,6 +256,29 @@ const demoApi = {
     for (const key of found.blocks) { const card = demoFindCard(key); card.blockers = card.blockers.filter((b) => b.id !== found.id); card.blocked = card.blockers.length > 0; card.ready = !card.blocked; card.open_question_count--; }
     demoEvent("question_answered", found.id);
     return clone(found);
+  },
+  discussQuestion: async (question: string, body: string): Promise<QuestionMessage> => {
+    const found = demoQuestions.find((q) => q.key === question)!;
+    const message: QuestionMessage = { id: `demo-m-${demoMessages.length + 1}`, question_id: found.id, question_key: found.key, author: "ui", author_is_human: true, body: body.trim(), created_at: new Date().toISOString(), read_by_human: true };
+    demoMessages.push(message);
+    found.message_count = (found.message_count ?? 0) + 1;
+    demoEvent("question_message_posted", found.id);
+    // The demo agent answers a moment later, so the unread marker can be seen.
+    setTimeout(() => {
+      demoMessages.push({ ...message, id: `demo-m-${demoMessages.length + 1}`, author: "agent:claude-demo", author_is_human: false, body: `Good point. I still recommend "${found.recommended_option}" for now; tell me if that changes your mind.`, created_at: new Date().toISOString(), read_by_human: false });
+      found.message_count = (found.message_count ?? 0) + 1;
+      found.unread_messages = (found.unread_messages ?? 0) + 1;
+      demoEvent("question_message_posted", found.id);
+    }, 1200);
+    return clone(message);
+  },
+  questionThread: async (question: string): Promise<QuestionMessage[]> => clone(demoMessages.filter((m) => m.question_key === question)),
+  markQuestionRead: async (question: string): Promise<number> => {
+    const found = demoQuestions.find((q) => q.key === question)!;
+    const cleared = found.unread_messages ?? 0;
+    found.unread_messages = 0;
+    for (const m of demoMessages) if (m.question_key === question) m.read_by_human = true;
+    return cleared;
   },
   assignQuestionStakeholder: async (question: Question, stakeholder: string): Promise<Question> => {
     const found = demoQuestions.find((item) => item.id === question.id)!;
