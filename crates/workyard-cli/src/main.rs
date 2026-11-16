@@ -254,14 +254,14 @@ enum TaskCommand {
         /// Do not require approval even if the board does
         #[arg(long)]
         no_review: bool,
-        #[arg(long)]
-        expected_version: i64,
+        #[arg(long, help = "Required unless you own the card")]
+        expected_version: Option<i64>,
     },
     UpdateChange {
         change: String,
         commit: String,
-        #[arg(long)]
-        expected_version: i64,
+        #[arg(long, help = "Required unless you own the card")]
+        expected_version: Option<i64>,
     },
     RequireReview {
         change: String,
