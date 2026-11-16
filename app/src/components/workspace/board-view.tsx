@@ -21,7 +21,7 @@ import { DependencyView } from "@/components/workspace/dependency-view";
 import { Badge } from "@/components/ui/badge";
 import { Card as UiCard } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { boardAgents, isRunning } from "@/lib/agents";
+import { boardAgents, isRunning, progressDisplay } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -245,10 +245,10 @@ export function BoardView({
                                 )}
                               </div>
                             )}
-                            <div className="mt-1.5 flex items-center gap-2">
-                              <Progress value={card.progress} className="h-1" />
+                            <div className="mt-1.5 flex items-center gap-2" title={progressDisplay(card).estimated ? "Estimated" : undefined}>
+                              <Progress value={progressDisplay(card).value} estimated={progressDisplay(card).estimated} className="h-1" />
                               <span className="w-7 text-right font-mono text-[10px] tabular-nums text-muted-foreground">
-                                {card.progress}%
+                                {progressDisplay(card).estimated ? "~" : ""}{progressDisplay(card).value}%
                               </span>
                             </div>
                             <AnimatePresence mode="wait">
