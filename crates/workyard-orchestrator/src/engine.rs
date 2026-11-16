@@ -567,6 +567,7 @@ impl<'a> Orchestrator<'a> {
             branch: branch_for(key),
             worktree: main.as_ref().map(|m| worktree_path(m, key)),
             target: main.as_deref().and_then(current_branch),
+            repository: RepositoryLink::resolve(self.store, board.as_ref()),
             main,
         }
     }
@@ -904,6 +905,42 @@ struct PromptContext {
     worktree: Option<PathBuf>,
     /// The branch checked out in the main checkout: where finished work lands.
     target: Option<String>,
+    /// What `task link-change` needs: the board's repository, or why there is none.
+    repository: RepositoryLink,
+}
+
+/// The board's repository as the prompt tells it, resolved once so workers need not look it up.
+enum RepositoryLink {
+    Known { id: String, target_branch: String },
+    NoProject,
+    NoRepository,
+}
+
+impl RepositoryLink {
+    fn resolve(store: &Store, board: Option<&Value>) -> Self {
+        let Some(project) = board.and_then(|b| b["project_id"].as_str()) else {
+            return Self::NoProject;
+        };
+        let repo = store
+            .view_project(project)
+            .ok()
+            .and_then(|p| p["repositories"].as_array()?.first().cloned());
+        match repo.as_ref().and_then(|r| Some((r["id"].as_str()?.to_owned(), r["target_branch"].as_str()?.to_owned()))) {
+            Some((id, target_branch)) => Self::Known { id, target_branch },
+            None => Self::NoRepository,
+        }
+    }
+
+    /// The `link-change` instruction for this card's branch.
+    fn link_line(&self, key: &str, branch: &str) -> String {
+        match self {
+            Self::Known { id, target_branch } => format!(
+                "record them with `workyard task link-change {key} {id} {branch}` (repository {id}, target branch {target_branch})"
+            ),
+            Self::NoProject => "this board has no project, so there is no repository id to link: skip `task link-change` and say so in your status note".into(),
+            Self::NoRepository => "this board's project has no repository registered, so there is no repository id to link: skip `task link-change` and say so in your status note".into(),
+        }
+    }
 }
 
 fn integration_steps(key: &str, ctx: &PromptContext) -> String {
@@ -969,9 +1006,8 @@ You are resumed once a human approves it; only then integrate and finish."
                 String::new()
             };
             format!(
-                "{home}\nCommit your work in the worktree. Once you have commits, record them with `workyard task link-change {key} <repository-id> {}` \
-(find the repository id with `workyard --json projects` then `workyard --json project <id>`), and run `workyard task update-change <change> <commit>` after each further commit.{review}\n{}",
-                ctx.branch,
+                "{home}\nCommit your work in the worktree. Once you have commits, {}, and run `workyard task update-change <change> <commit>` after each further commit (the change id is in the link-change output).{review}\n{}",
+                ctx.repository.link_line(key, &ctx.branch),
                 integration_steps(key, ctx)
             )
         }
@@ -1042,7 +1078,7 @@ mod integration_prompt_tests {
     use super::*;
 
     fn ctx(rebase: bool) -> PromptContext {
-        PromptContext { review: false, rebase, branch: "workyard/c-1".into(), main: None, worktree: None, target: Some("main".into()) }
+        PromptContext { review: false, rebase, branch: "workyard/c-1".into(), main: None, worktree: None, target: Some("main".into()), repository: RepositoryLink::Known { id: "repo-1".into(), target_branch: "main".into() } }
     }
 
     #[test]
@@ -1067,5 +1103,18 @@ mod integration_prompt_tests {
             assert!(prompt.contains("Do not raise a question for a mechanical blocker"));
             assert!(prompt.contains("Behind a toggle"));
         }
+    }
+
+    #[test]
+    fn claim_prompt_gives_the_ready_to_run_link_line() {
+        let known = claim_prompt("B-1", "C-1", "agent:x", Workspace::Worktree, &ctx(false));
+        assert!(known.contains("workyard task link-change C-1 repo-1 workyard/c-1"));
+        assert!(!known.contains("<repository-id>") && !known.contains("workyard --json projects"));
+        let mut none = ctx(false);
+        none.repository = RepositoryLink::NoProject;
+        let p = claim_prompt("B-1", "C-1", "agent:x", Workspace::Worktree, &none);
+        assert!(p.contains("no project") && !p.contains("task link-change C-1"));
+        none.repository = RepositoryLink::NoRepository;
+        assert!(claim_prompt("B-1", "C-1", "agent:x", Workspace::Worktree, &none).contains("no repository registered"));
     }
 }
