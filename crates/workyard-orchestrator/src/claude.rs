@@ -408,6 +408,7 @@ impl Runner for ClaudeRunner {
             .arg(&launch.session_id)
             .args(&self.args)
             .args(if launch.allow_rules.is_empty() { vec![] } else { ["--allowedTools".to_owned()].into_iter().chain(launch.allow_rules.iter().cloned()).collect() })
+            .envs(&launch.env)
             .env("WORKYARD_ACTOR", &launch.actor)
             .env("WORKYARD_DB", &self.db)
             .stdin(Stdio::piped())

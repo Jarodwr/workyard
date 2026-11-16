@@ -16,6 +16,7 @@ mod orchestrator;
 mod permissions;
 pub use orchestrator::DEFAULT_LEASE_SECONDS;
 mod phases;
+pub use orchestrator::parse_env_pair;
 pub use phases::parse_phase_window;
 mod projects;
 mod sessions;
@@ -1675,7 +1676,7 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
-pub(crate) const SCHEMA_VERSION: i64 = 18;
+pub(crate) const SCHEMA_VERSION: i64 = 19;
 
 fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -1878,6 +1879,15 @@ fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 18")?;
+        version = 18;
+    }
+    if version == 18 {
+        tx.execute_batch(include_str!("../migrations/019.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (19,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 19")?;
     }
     tx.commit()?;
     Ok(())
