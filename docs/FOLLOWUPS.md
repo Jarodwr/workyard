@@ -11,12 +11,13 @@ Changes found or requested during the first real sample runs (a todo app built b
    todo run (all 8 cards merged by their workers). A dirty main checkout still makes the fast-forward fail; the worker
    is told to stop and ask.
 2. **Done gate checks the commit is on the target branch.** **Done** (`not_integrated`).
-3. **Resume when the condition is met, not when a question is answered.** **Partial.** `--for-integration` is a new wait
-   kind that resumes only when the branch is on the target; review already worked this way. A plain question wait still
-   resumes as soon as the question is answered, whatever else is unresolved.
+3. **Resume when the condition is met, not when a question is answered.** **Done.** `--for-integration` is a wait kind
+   beside a question and `--for-review`; a session resumes only when every condition recorded on its pause holds. A pause
+   that waits only for a question still resumes as soon as that question is answered, by design.
 4. **Fast-failure guard counts only failure exits.** **Done.**
-5. **No questions for mechanical blockers.** **Partial.** In the worker prompt only (nothing enforces it). The second
-   run raised none.
+5. **No questions for mechanical blockers.** **Partial.** In the worker prompt and plugin skill only (nothing enforces
+   it); the same text now also asks workers to ask, with a recommendation, whenever a card leaves a real choice open.
+   The second run raised none about mechanics.
 6. **Merge trains.** **Partial.** The prompt tells workers to follow the repository's documented train; no train was
    tested.
 7. **Recovery of detached cards.** **Done**: reclaimed up to 2 times per card per run, then a human is notified.
@@ -47,21 +48,21 @@ Changes found or requested during the first real sample runs (a todo app built b
 
 ## Visibility
 
-12. **Live phase graph and running animation.** **Done** for the graph. Kanban cards have no running animation.
+12. **Live phase graph and running animation.** **Done**: the graph and the kanban cards both animate running work.
 13. **Agents dock.** **Done**, with a gap in checking: seen open with no agents; not yet seen with live agents, the log
     tail, or the settings popover.
-14. **Progress reporting.** **Partial.** Each card now shows its last action live and the graph shows a progress bar,
-    but the percentage is still only what the agent reports (or 100 on Done), so bars sit at 0% while a card runs.
-    Idea: estimate from the stream, or have the prompt checkpoint progress at set points.
-15. **Wire routing in the graph.** **Done** (corridors, lanes, rounded corners, arrowheads mid-line). Where several
-    wires merge into one card their arrowheads overlap; not checked on a large board or at other zoom levels.
+14. **Progress reporting.** **Partial.** Each card shows its last action live and the graph shows a progress bar. A
+    running card still at 0% shows an estimated bar, but the real percentage is only what the agent reports (or 100 on
+    Done). Left: checkpoint progress at set points in the prompt, or a better estimate from the stream.
+15. **Wire routing in the graph.** **Done** (corridors, lanes, rounded corners, one arrowhead per merge, zoom steps
+    50-150%, corridor tracks capped). Not checked on a very large board.
 
 ## Orchestrator agent
 
 16. **Supervisor agent beside the script.** **Done, opt-in** (`orch run --supervisor`). The script keeps the lease and
     the processes; the supervisor unsticks the workflow with its shell, git and the CLI (see the rules below). Its
-    limits are enforced by the core (`forbidden_for_supervisor`), not only by its prompt. Gaps: no toggle in the
-    desktop; never seen handling a real stuck worker.
+    limits are enforced by the core (`forbidden_for_supervisor`), not only by its prompt. The desktop has a Supervisor
+    setting next to Start. Gap: never seen handling a real stuck worker.
 
     Rules for the supervisor:
     - It repairs and re-launches work (mechanics); it never decides what the work should be (judgement), and it is not a
@@ -80,17 +81,45 @@ Changes found or requested during the first real sample runs (a todo app built b
 
 ## Delivery
 
-17. **Packaging.** **Partial.** Done: CLI sidecar, plugin marketplace manifest, bundled plugin, icons config, debug
-    `.app` build, `--plugin-dir` autodetection. Open: release build and dmg, signing and notarization (needs Apple
-    credentials), a real 1024px icon, `WORKYARD_BIN` exported to terminals opened from the desktop.
+17. **Packaging.** **Partial.** Done: CLI sidecar, plugin marketplace manifest, bundled plugin, icon set from an SVG
+    source, release `.app` and dmg built and checked (unsigned, ad-hoc signature), `--plugin-dir` autodetection (also
+    `share/workyard/plugin` for Homebrew), the desktop starting the bundled CLI and exporting `WORKYARD_BIN` to
+    terminals, `workyard --version` and `doctor`, one-place versioning (`scripts/set-version.sh`), `scripts/release.sh`
+    (tarball and checksums) and Homebrew formula/cask templates (`docs/RELEASING.md`, `docs/HOMEBREW.md`). Open:
+    signing and notarization (needs Apple credentials), publishing a release and tap (nothing has been tagged, pushed or
+    installed into a real Homebrew prefix), a `LICENSE` file, an "Install CLI" button.
 18. **Verify the desktop visually.** **Partial.** Graph, toolbar, running chips and the opened dock were seen in the
-    real app on macOS. Not seen: dock with live agents, log tail, settings popover, graph at other zoom levels, the new
-    progress bar.
+    real app on macOS. Not seen: dock with live agents, log tail, settings popover, graph at other zoom levels, the
+    progress bar, the card detail tabs, the permission buttons.
 
 ## New, found in the second run
 
-19. **Planner guidance.** Cards that overlap in scope (C-4 built what C-6 was meant to). Tell planners to split cards
-    by file or behaviour so they do not overlap.
-20. **A rebuilt `workyard` binary mid-run breaks workers.** Workers use the binary in the orchestrator's directory; a
-    rebuild during the run made every command fail with `schema_too_new` for a while. Copy the binary at start, or
-    point workers at a stable copy, and make the error say which side is older.
+19. **Planner guidance.** **Done.** The planner skill tells planners to split cards by file or behaviour so they do
+    not overlap. Not enforced.
+20. **A rebuilt `workyard` binary mid-run breaks workers.** **Done.** Workers run from a stable copy in `<db>.bin`;
+    `schema_too_new` names both versions and which side is older; a migration is refused under a live older
+    orchestrator (`--allow-migrate` overrides); `orch restart <board>` moves a board to a new binary.
+
+## Found while dogfooding the planner
+
+21. **Idle workers while ready cards waited in later phases.** **Done.** The dispatcher offered only the current and the
+    next phase, so ready cards in the third phase sat idle (C-12 and C-15). It now dispatches any ready card whatever
+    its phase (dependencies order the work); the board setting `phase_window` (`plan board-phase-window <board>
+    <n|all>`, default `all`) narrows that, and `orch status` shows `held_back_by_phase` and `held_back_cards`, so
+    idle workers have a visible reason. Not shown in the desktop yet.
+
+## What changed since the second run
+
+- Workers: stable binary copy, main-checkout check before dispatch, worktree and branch removed once Done and merged
+  (`--keep-worktrees`), a worktree setup script, `--worker-env` and a board default (`plan board-worker-env`), a claim
+  prompt carrying the repository id and the exact `link-change` line, a card's owner linking changes without a version.
+- Merging: `plan board-integration merge|rebase`; `--for-integration` pauses; Done gate unchanged (`not_integrated`).
+- Orchestrator: `orch restart`, `orch reclaim`, `orch perms`, safe-mode permission prompts answered from the desktop,
+  `phase_window`, a pool of 3 workers by default, the supervisor limited by the core.
+- CLI: `status`, `wait`, `doctor`, `--version`, `task report` (markdown report on a card, shown in a Report tab).
+- Planning: new project from a repository and a one-click project planner; phase status derived from cards and
+  questions; a cancelled prerequisite no longer blocks its dependents and stays visible as cancelled.
+- Desktop: tabbed card detail with attention badges, markdown in descriptions and notes, remembered project, board,
+  view, phase, zoom and dock, running animation on kanban cards, the Supervisor setting, Allow/Deny buttons.
+- Packaging: see item 17.
+

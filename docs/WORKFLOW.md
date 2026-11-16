@@ -4,8 +4,8 @@ How a person runs work through Workyard: prepare a board with a planner agent, s
 
 ## One-time setup
 
-1. Build and put `workyard` on your PATH: `cargo build --release -p workyard-cli` and link `target/release/workyard`.
-2. Install the Claude Code plugin from `plugin/` so agents get the `workyard` and `workyard-planner` skills.
+1. Build and put `workyard` on your PATH: `cargo build --release -p workyard-cli` and link `target/release/workyard` (the desktop app bundles its own copy). Run `workyard doctor` to check the install.
+2. Install the Claude Code plugin from `plugin/` so agents get the `workyard` and `workyard-planner` skills (`claude plugin marketplace add <repo>`, `claude plugin install workyard@workyard`; see PACKAGING.md). The orchestrator also loads it into workers itself.
 3. Run the desktop: `mise run dev` (or `WORKYARD_DB=... mise run dev` for another database).
 4. Make sure `ANTHROPIC_API_KEY` is **not** set if you want workers to use your Claude subscription; a key in the environment overrides the login.
 
@@ -15,7 +15,7 @@ Planning happens before any worker starts and is done by a separate agent, so it
 
 > Use the workyard-planner skill. Goal: *<what you want built>*. The repository is *<path>*. Set up a project, a board with phases, small cards with clear done-criteria and dependencies, mark investigations with `--workspace none`, and raise a question for anything you cannot decide. Do not start any card. Tell me which board to run.
 
-Then open the desktop and review what it made: the phase graph (order, chokepoints, blocked work) and each card. Fix it by asking the planner to change things, or answer the questions it raised. Planning edits are safe while an orchestrator runs: a paused board starts nothing, and a running one picks up changes on its next pass.
+In the desktop, **New project** from a repository creates the project and a planner run does the rest in one click; the prompt above is the same thing by hand. Then open the desktop and review what it made: the phase graph (order, chokepoints, blocked work) and each card. Fix it by asking the planner to change things, or answer the questions it raised. Planning edits are safe while an orchestrator runs: a paused board starts nothing, and a running one picks up changes on its next pass.
 
 ## 2. Run
 
@@ -27,7 +27,10 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 
 - From a terminal it stays in the foreground; Ctrl-C stops the workers, pauses their sessions, and releases the board.
 - Each worker runs `claude -p` in its own git worktree (`<repo>/.workyard/worktrees/<card>`, branch `workyard/<card>`) and finishes by merging its own work into the main branch. A new worktree first runs `scripts/worktree-setup.sh` (see ORCHESTRATOR.md) so `app/node_modules` and the staged sidecar are present. It is not sandboxed to the worktree, so it can do that merge. Workers run with permission checks off by default (`--permissions full`); pass `--permissions safe` for edits plus an allowlist of commands. Investigations (`--workspace none`) run in the repository without a worktree.
-- Only one orchestrator can hold a board; a second `orch run` is refused and names the holder.
+- Only one orchestrator can hold a board; a second `orch run` is refused and names the holder. A board starts with a pool of 3 workers (`--pool`, or `workyard orch pool`).
+- Useful flags: `--supervisor` (a supervisor agent that unsticks the workflow; the desktop has a Supervisor setting), `--worker-env KEY=VALUE` (also `plan board-worker-env` for a board default), `--keep-worktrees` (worktrees and branches are removed once a card is Done and merged), `--allow 'Bash(make:*)'` with `--permissions safe`.
+- Ready cards are dispatched whatever their phase. `plan board-phase-window <board> <n|all>` limits that to `n` phases past the current one; `orch status` shows `held_back_by_phase` when the window leaves workers idle.
+- After you rebuild `workyard`, `workyard orch restart B-1` drains the board and relaunches the orchestrator on the new binary; workers run from a stable copy in `<db>.bin`, so a rebuild does not break a run in progress.
 - macOS notifications tell you when a question needs an answer, a commit needs review, a card needs a human, or the board is waiting on a usage limit. Add `--no-notify` to silence them.
 
 ## 3. Supervise
@@ -41,6 +44,8 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 | Pause new work | **Pause** in the board's orchestrator bar (or `workyard orch pause B-1`). Running workers continue; **Drain** also stops starting anything while they finish. **Resume** to carry on. |
 | Edit the plan safely | Pause, edit, resume. |
 | Take over a worker | Card → Agent session → **Open in terminal**. It stops the orchestrator's worker, holds the session, and opens `claude --resume` in your terminal. When you are done, exit Claude and press **Release hold**; the orchestrator resumes it with everything it missed. |
+| Allow a tool in `--permissions safe` | A refused tool shows **Allow once / Allow for this run / Deny** on the card; or `workyard orch perms list B-1 --status pending` and `orch perms decide <id> allow-once\|allow-run\|deny`. |
+| Read a long write-up | A card's **Report** tab (investigations write one with `task report`). |
 | Take work away from a worker | Force-release the card (`workyard orch force-release C-3 --reason "..." --expected-version N`), which stops its worker; then replan or cancel it. Only a card's owner can cancel it. |
 | See what a worker is doing | `<db>.logs/<card>-<session>.log` holds its stream-json output. |
 
