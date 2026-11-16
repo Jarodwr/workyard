@@ -45,3 +45,13 @@ Example effect:
 - If the owner has released or transferred the card by the time the message is delivered, check the current card before sending and avoid notifying a stale owner.
 
 `owner_actor` is a cooperative local identity string. An attached task session records its runtime and resume ID; the orchestrator still supplies the transport and handles tasks without an attached session.
+
+## Orchestrator host (decided, not yet implemented)
+
+- The orchestrator is a long-lived process started with `workyard orch run <board>` (also launched by the desktop). The `workyard-orchestrator` crate depends only on `workyard-core`'s public commands, never on `rusqlite`, so every action goes through the same validated, evented command layer as the CLI and UI. Its actor is `orch:<board>`.
+- Runtimes are backends behind a `Runner` trait (`spawn`, `resume`, `send`, `is_alive`, `focus`): Claude Code first, then Codex, optionally a terminal-pane runner. Agents report work through board commands (progress, notes, questions, moves), which stay durable events. The runner's output stream and exit status supply only ephemeral liveness signals.
+- At most one orchestrator runs per board. `orchestrator_sessions` holds one row per board: desired state (`running`, `paused`, `draining`), the event cursor, worker pool size, and the lease (holder, pid, `epoch`, `expires_at`). `orch_acquire` takes the lease in an immediate transaction and fails with `orchestrator_conflict` while a live lease exists. A takeover after expiry increments `epoch`.
+- Every orchestrator-initiated write carries its epoch and is rejected if it is stale, so a suspended or zombie orchestrator cannot act after replacement. Lease expiry alone is not the guarantee.
+- Dispatch is one command, `orch_dispatch(board, epoch)`: select via `next`, claim, move to In Progress, and attach the session in one transaction.
+- `orch pause`, `orch resume`, and `orch drain` change the desired state. A paused board dispatches nothing; running workers continue unless draining. Planning edits made while paused are picked up on resume because `next` is a live query.
+- On startup the orchestrator reconciles attached sessions with `is_alive`, re-adopting live ones and detaching dead ones.
