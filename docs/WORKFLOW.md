@@ -56,4 +56,4 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 1. Orchestrator bar: is one connected? Is the board paused, draining, or waiting?
 2. Card: is it blocked, stale, or held? Is there an unapproved commit?
 3. The worker's log in `<db>.logs/`.
-4. `workyard orch status B-1` and `workyard events --since N` for the raw record.
+4. `workyard status B-1` is the one-screen summary (lanes, progress, running or paused, open questions, orchestrator and backoff; `--json` for scripts), and `workyard wait B-1 --until attention|done|<n>-done [--timeout 30m]` blocks until something needs you or the work is done, printing why (exit 0; exit 4 on timeout). `workyard orch status B-1` and `workyard events --since N` for the raw record.

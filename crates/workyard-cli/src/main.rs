@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+mod watch;
+
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -63,6 +65,18 @@ enum Command {
     },
     Card {
         card: String,
+    },
+    /// One-screen board summary: lanes, progress, who is running, open questions, orchestrator.
+    Status { board: String },
+    /// Block until a board needs attention or finishes; prints why and exits 0, or exits 1 on timeout.
+    Wait {
+        board: String,
+        /// attention, done, or <n>-done (n more cards finished than when the wait began)
+        #[arg(long, default_value = "attention")]
+        until: String,
+        /// Give up after this long, e.g. 90s, 30m, 2h (default: wait forever)
+        #[arg(long)]
+        timeout: Option<String>,
     },
     Projects,
     Project {
@@ -683,6 +697,8 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
             },
         )?,
         Command::Card { card } => store.view_card(&card)?,
+        Command::Status { board } => watch::snapshot(store, &board)?,
+        Command::Wait { .. } => unreachable!("handled in main"),
         Command::Projects => store.list_projects()?,
         Command::Project { project } => store.view_project(&project)?,
         Command::Questions { board, open, kind } => store.list_questions_filtered(
@@ -1292,8 +1308,40 @@ fn main() {
         Some(path) => Ok(path),
         None => Store::default_path(),
     };
+    if let Command::Wait { board, until, timeout } = &cli.command {
+        let store = path.map(|p| Store::new(p).allow_migrate(cli.allow_migrate));
+        let outcome = store.and_then(|store| {
+            let until = watch::parse_until(until)?;
+            let timeout = timeout.as_deref().map(watch::parse_duration).transpose()?;
+            watch::wait(&store, board, &until, timeout)
+        });
+        match outcome {
+            Ok(Some(why)) => {
+                if cli.json {
+                    println!("{}", json!({"ok":true,"data":{"met":true,"reason":why}}));
+                } else {
+                    println!("{why}");
+                }
+            }
+            Ok(None) => {
+                if cli.json {
+                    println!("{}", json!({"ok":false,"error":{"code":"timeout","message":"timed out"}}));
+                } else {
+                    eprintln!("timed out");
+                }
+                std::process::exit(4);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(exit_code(&error));
+            }
+        }
+        return;
+    }
+    let text_status = !cli.json && matches!(cli.command, Command::Status { .. });
     let result = path.and_then(|path| run(&Store::new(path).allow_migrate(cli.allow_migrate), &cli.actor, cli.command));
     match result {
+        Ok(data) if text_status => print!("{}", watch::render(&data)),
         Ok(data) => {
             if cli.json {
                 println!("{}", json!({"ok":true,"data":data}));
