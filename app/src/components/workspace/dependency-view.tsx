@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { loadViewState, pickZoom, saveViewState } from "@/lib/view-state";
 import {
   ArrowUpRight, Bot, Check, GitFork, Link2,
   LockKeyhole, Minus, Plus, X, CircleHelp,
@@ -20,7 +21,7 @@ import { cn } from "@/lib/utils";
 
 export function DependencyView({
   board, questions, stakeholders, onOpenCard, onOpenPhase, onAnswer, onAssignStakeholder,
-  phaseFilter, showCompleted, onOpenInTerminal, onReleaseHold,
+  phaseFilter, showCompleted, onOpenInTerminal, onReleaseHold, scope,
 }: {
   board: Board;
   questions: Question[];
@@ -34,12 +35,15 @@ export function DependencyView({
   showCompleted: boolean;
   onOpenInTerminal: (card: Card) => Promise<boolean>;
   onReleaseHold: (card: Card) => Promise<boolean>;
+  /** Database path the zoom is remembered under. */
+  scope: string;
 }) {
   const [dependencies, setDependencies] = useState<Dependency[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState<number>(1);
+  const [zoom, setZoom] = useState<number>(() => pickZoom(loadViewState(scope).zoom, GRAPH_ZOOM_LEVELS, 1));
+  useEffect(() => { saveViewState(scope, { zoom }); }, [scope, zoom]);
   const [answeringId, setAnsweringId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [answerNote, setAnswerNote] = useState("");

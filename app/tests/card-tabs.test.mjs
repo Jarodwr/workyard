@@ -44,8 +44,8 @@ test("a remembered tab wins over attention", () => {
 test("arrow keys wrap and Home/End jump", () => {
   assert.equal(nextTab("overview", "ArrowRight"), "activity");
   assert.equal(nextTab("overview", "ArrowLeft"), CARD_TABS.at(-1));
-  assert.equal(nextTab("links", "ArrowRight"), "overview");
+  assert.equal(nextTab("report", "ArrowRight"), "overview");
   assert.equal(nextTab("code", "Home"), "overview");
-  assert.equal(nextTab("code", "End"), "links");
+  assert.equal(nextTab("code", "End"), "report");
   assert.equal(nextTab("code", "a"), null);
 });

@@ -50,7 +50,7 @@ export type Card = {
 };
 export type Lane = { id: string; name: string; kind: string; position: number; version: number; cards: Card[] };
 export type Phase = { id: string; board_id: string; name: string; description: string; version: number; closed_at: string | null; position: number; status: "closed" | "current" | "future" };
-export type Board = { id: string; key: string; name: string; description: string; version: number; archived: boolean; review_required?: boolean; project_id?: string | null; current_phase_id?: string | null; phases: Phase[]; lanes: Lane[] };
+export type Board = { id: string; key: string; name: string; description: string; version: number; archived: boolean; review_required?: boolean; integration?: "merge" | "rebase"; project_id?: string | null; current_phase_id?: string | null; phases: Phase[]; lanes: Lane[] };
 export type ProjectListItem = { id: string; name: string; description: string; version: number; board_count: number };
 export type Project = ProjectListItem & {
   boards: { id: string; key: string; name: string; description: string; archived: boolean }[];
@@ -74,7 +74,8 @@ export type PermissionDecision = "allow_once" | "allow_run" | "deny";
 export type AgentLogRow = { kind: "text" | "tool" | "result" | "error" | "user"; text: string; tool?: string };
 export type CardNote = { id: string; card_id: string; actor: string; body: string; created_at: string };
 export type TaskSession = { id: string; card_id: string; owner_actor: string; runner: string; external_session_id: string; attached_at: string; paused_at: string | null; waiting_question_id: string | null; waiting_question_key: string | null; last_delivered_event_id: number; detached_at: string | null; held_by?: string | null };
-export type CardDetail = Card & { dependencies: Dependency[]; changes: CardChange[]; notes: CardNote[]; session: TaskSession | null; events: { id: number; type: string; actor: string; ts: string }[] };
+export type CardReport = { body: string; actor: string; version: number; updated_at: string };
+export type CardDetail = Card & { dependencies: Dependency[]; changes: CardChange[]; notes: CardNote[]; report: CardReport | null; session: TaskSession | null; events: { id: number; type: string; actor: string; ts: string }[] };
 
 export const api = {
   listProjects: () => invoke<ProjectListItem[]>("list_projects"),
@@ -83,6 +84,7 @@ export const api = {
   viewBoard: (board: string) => invoke<Board>("view_board", { board }),
   viewCard: (card: string) => invoke<CardDetail>("view_card", { card }),
   addCardNote: (card: string, body: string) => invoke<CardNote>("add_card_note", { card, body }),
+  dbPath: () => invoke<string>("db_path"),
   latestEventId: () => invoke<number>("latest_event_id"),
   pollEvents: (since: number, limit = 100) => invoke<EventPage>("poll_events", { since, limit }),
   listQuestions: () => invoke<Question[]>("list_questions"),
@@ -96,6 +98,7 @@ export const api = {
   releaseSessionHold: (card: string) => invoke<TaskSession>("release_session_hold", { card }),
   holdSession: (card: string) => invoke<TaskSession>("hold_session", { card }),
   agentLogTail: (card: string, limit = 60) => invoke<AgentLogRow[]>("agent_log_tail", { card, limit }),
+  setBoardIntegration: (board: string, integration: "merge" | "rebase") => invoke<Board>("set_board_integration", { board, integration }),
   setBoardReviewRequired: (board: string, required: boolean) => invoke<Board>("set_board_review_required", { board, required }),
   approveChange: (change: CardChange) => invoke<CardChange>("approve_change", { change: change.id, expectedVersion: change.version }),
   orchestratorStatus: (board: string) => invoke<Orchestrator>("orchestrator_status", { board }),
@@ -182,6 +185,7 @@ const demoApi = {
     { kind: "tool", tool: "Bash", text: "node --test" },
     { kind: "result", text: "ℹ tests 10  ℹ pass 10  ℹ fail 0" },
   ],
+  setBoardIntegration: async (board: string, integration: "merge" | "rebase"): Promise<Board> => { const target = [demoBoard, demoRuntimeBoard, demoResearchBoard].find((item) => item.key === board || item.id === board) ?? demoBoard; target.integration = integration; demoEvent("board_integration_changed", target.id); return clone(target); },
   setBoardReviewRequired: async (board: string, required: boolean): Promise<Board> => { const target = [demoBoard, demoRuntimeBoard, demoResearchBoard].find((item) => item.key === board || item.id === board) ?? demoBoard; target.review_required = required; demoEvent("board_review_changed", target.id); return clone(target); },
   approveChange: async (change: CardChange): Promise<CardChange> => ({ ...clone(change), approved_commit_oid: change.commit_oid, reviewer: "demo", version: change.version + 1 }),
   orchestratorStatus: async (board: string): Promise<Orchestrator> => ({ ...clone(demoOrchestrator), board_key: board }),
@@ -190,7 +194,7 @@ const demoApi = {
   viewProject: async (project: string): Promise<Project> => project === "demo-field-notes" ? { id: "demo-field-notes", name: "Field Notes", description: "A non-code research project", version: 1, board_count: 1, boards: [{ id: demoResearchBoard.id, key: demoResearchBoard.key, name: demoResearchBoard.name, description: demoResearchBoard.description, archived: false }], repositories: [], documents: [], stakeholders: [], changes: [] } : { id: "demo-project", name: "Workyard", description: "Local agent workspace", version: 1, board_count: 2, boards: [demoBoard,demoRuntimeBoard].map((board)=>({id:board.id,key:board.key,name:board.name,description:board.description,archived:false})), repositories: [{ id: "demo-repo", path: "~/Development/workyard", target_branch: "main", remote_url: null }], documents: [{ id: "demo-adr", repository_id: "demo-repo", path: "docs/adr/0001-board-phases-and-scheduling.md", kind: "adr", title: "Board phases and scheduling" }, { id: "demo-diagram", repository_id: "demo-repo", path: "docs/architecture.md", kind: "diagram", title: "Workyard architecture" }, { id: "demo-doc", repository_id: "demo-repo", path: "docs/SPEC.md", kind: "documentation", title: "Build spec" }], stakeholders: [{ id: "demo-person", name: "Product lead", role: "Business decisions", contact: "Local demo contact" }, { id: "demo-engineering", name: "Engineering lead", role: "Architecture review", contact: "Local demo contact" }], changes: [] },
   listBoards: async (): Promise<BoardListItem[]> => [demoBoard,demoRuntimeBoard,demoResearchBoard].map((board) => ({ ...clone(board), lanes: board.lanes.map((lane) => ({ lane_id: lane.id, name: lane.name, count: lane.cards.length })) })),
   viewBoard: async (board: string): Promise<Board> => clone([demoBoard,demoRuntimeBoard,demoResearchBoard].find((item)=>item.key===board || item.id===board) ?? demoBoard),
-  viewCard: async (card: string): Promise<CardDetail> => ({ ...clone(demoFindCard(card)), dependencies: clone(demoDependencies.filter((d) => d.from_card_id === demoFindCard(card).id || d.to_card_id === demoFindCard(card).id)), changes: [], notes: clone(demoNotes.filter((n) => n.card_id === demoFindCard(card).id)), session: null, events: [] }),
+  viewCard: async (card: string): Promise<CardDetail> => ({ ...clone(demoFindCard(card)), dependencies: clone(demoDependencies.filter((d) => d.from_card_id === demoFindCard(card).id || d.to_card_id === demoFindCard(card).id)), changes: [], report: null, notes: clone(demoNotes.filter((n) => n.card_id === demoFindCard(card).id)), session: null, events: [] }),
   addCardNote: async (card: string, body: string): Promise<CardNote> => { const note = { id: `demo-note-${demoNotes.length + 1}`, card_id: demoFindCard(card).id, actor: "ui", body: body.trim(), created_at: new Date().toISOString() }; demoNotes.push(note); demoEvent("card_note_added", note.card_id); return clone(note); },
   createBoard: async (name: string): Promise<Board> => { demoBoard.name = name; return clone(demoBoard); },
   createCard: async (_board: string, title: string): Promise<Card> => {
@@ -216,6 +220,7 @@ const demoApi = {
   transferCard: async (card: Card, toActor: string): Promise<Card> => { const c = demoFindCard(card.id); c.owner_actor = toActor; c.version++; demoEvent("card_transferred", c.id); return clone(c); },
   forceReleaseCard: async (card: Card, _reason: string): Promise<Card> => { const c = demoFindCard(card.id); c.owner_actor = null; c.version++; demoEvent("card_force_released", c.id); return clone(c); },
   updateProgress: async (card: Card, progress: number, note: string): Promise<Card> => { const c = demoFindCard(card.id); c.progress = progress; c.status_note = note; c.version++; demoEvent("progress_updated", c.id); return clone(c); },
+  dbPath: async (): Promise<string> => "demo",
   latestEventId: async (): Promise<number> => demoEvents.length,
   pollEvents: async (since: number, limit = 100): Promise<EventPage> => {
     const events = demoEvents.filter((e) => e.id > since);

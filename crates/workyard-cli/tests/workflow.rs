@@ -288,6 +288,8 @@ fn cli_review_setting_permissions_and_integration_pause() {
     assert_eq!(board["review_required"], false);
     assert_eq!(ok(&["plan", "board-review", key, "on"])["review_required"], true);
     assert_eq!(ok(&["plan", "board-review", key, "off"])["review_required"], false);
+    assert_eq!(board["integration"], "merge");
+    assert_eq!(ok(&["plan", "board-integration", key, "rebase"])["integration"], "rebase");
     assert_eq!(ok(&["orch", "status", key])["permissions"], "full");
 
     // Pausing for integration is a real wait kind, and it combines with the others.

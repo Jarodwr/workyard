@@ -21,10 +21,12 @@ type Props = {
   onToggleAgents: () => void;
   reviewRequired: boolean;
   onReviewRequired: (required: boolean) => void;
+  integration: "merge" | "rebase";
+  onIntegration: (integration: "merge" | "rebase") => void;
 };
 
 /** One slim bar: view controls on the left, legend, orchestrator and planner on the right. */
-export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState, onStartOrchestrator, onStopOrchestrator, onPlan, showLegend, agentsOpen, runningAgents, onToggleAgents, reviewRequired, onReviewRequired }: Props) {
+export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState, onStartOrchestrator, onStopOrchestrator, onPlan, showLegend, agentsOpen, runningAgents, onToggleAgents, reviewRequired, onReviewRequired, integration, onIntegration }: Props) {
   return (
     <div className="mb-2 flex shrink-0 items-center gap-2 rounded-lg border bg-card px-2.5 py-1.5 text-xs">
       <div className="flex min-w-0 flex-1 items-center gap-3">{left}</div>
@@ -33,7 +35,7 @@ export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState
         <Bot className="size-3.5" /> Agents
         {runningAgents > 0 && <span className="rounded-full bg-primary px-1.5 text-[10px] font-semibold tabular-nums leading-4 text-primary-foreground" aria-label={`${runningAgents} running`}>{runningAgents}</span>}
       </Button>
-      <SettingsButton boardKey={boardKey} orchestrator={orchestrator} reviewRequired={reviewRequired} onReviewRequired={onReviewRequired} />
+      <SettingsButton boardKey={boardKey} orchestrator={orchestrator} reviewRequired={reviewRequired} onReviewRequired={onReviewRequired} integration={integration} onIntegration={onIntegration} />
       <OrchestratorControls boardKey={boardKey} orchestrator={orchestrator} onState={onOrchestratorState} onStart={onStartOrchestrator} onStop={onStopOrchestrator} />
       <Button size="sm" variant="outline" className="h-7 gap-1.5 px-2.5 text-xs" onClick={onPlan} title="Open a planner agent in your terminal, pointed at this board">
         <ClipboardList className="size-3.5" /> Plan
@@ -42,7 +44,7 @@ export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState
   );
 }
 
-function SettingsButton({ boardKey, orchestrator, reviewRequired, onReviewRequired }: { boardKey: string; orchestrator: Orchestrator | null; reviewRequired: boolean; onReviewRequired: (required: boolean) => void }) {
+function SettingsButton({ boardKey, orchestrator, reviewRequired, onReviewRequired, integration, onIntegration }: { integration: "merge" | "rebase"; onIntegration: (integration: "merge" | "rebase") => void; boardKey: string; orchestrator: Orchestrator | null; reviewRequired: boolean; onReviewRequired: (required: boolean) => void }) {
   const full = orchestrator?.permissions !== "safe";
   const [supervisor, setSupervisor] = useState(() => getSupervisorPreference(boardKey));
   return (
@@ -73,6 +75,11 @@ function SettingsButton({ boardKey, orchestrator, reviewRequired, onReviewRequir
       <label className="flex cursor-pointer items-start gap-2 text-muted-foreground">
         <input type="checkbox" className="mt-0.5" checked={reviewRequired} onChange={(event) => onReviewRequired(event.target.checked)} />
         <span><strong className="text-foreground">Require review before merge</strong>: new code changes wait for your approval in the card. Off by default for local projects.</span>
+      </label>
+      <p className="mb-2 mt-3 border-t pt-3 font-medium text-foreground">Integration</p>
+      <label className="flex cursor-pointer items-start gap-2 text-muted-foreground">
+        <input type="checkbox" className="mt-0.5" checked={integration === "rebase"} onChange={(event) => onIntegration(event.target.checked ? "rebase" : "merge")} />
+        <span><strong className="text-foreground">Rebase instead of merge</strong>: workers rebase their branch onto the target and fast-forward, so history stays linear. Off leaves a merge commit per card.</span>
       </label>
     </Popover>
   );

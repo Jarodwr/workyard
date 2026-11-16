@@ -15,7 +15,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::notify::{Notifier, Silent};
 use crate::runner::{LimitHit, Launch, PermissionAnswer, PermissionAsk, Runner, Worker, WorkerState, Workspace};
-use crate::worktree::{branch_for, current_branch, remove_merged, worktree_path};
+use crate::worktree::{branch_for, check_main_checkout, current_branch, remove_merged, worktree_path};
 
 pub struct Options {
     pub holder: String,
@@ -112,6 +112,10 @@ pub struct Orchestrator<'a> {
     reclaims: HashMap<String, u32>,
     /// Cards moved to Done whose worktree and branch are still to be removed.
     cleanup: HashSet<String>,
+    /// The branch the main checkout was on when the run started; workers merge into it.
+    expected_branch: Option<String>,
+    /// The main-checkout problem already announced, so each distinct one notifies once.
+    checkout_problem: Option<String>,
 }
 
 struct Live {
@@ -141,6 +145,8 @@ impl<'a> Orchestrator<'a> {
             denials_seen: HashSet::new(),
             reclaims: HashMap::new(),
             cleanup: HashSet::new(),
+            expected_branch: None,
+            checkout_problem: None,
         }
     }
 
@@ -177,6 +183,7 @@ impl<'a> Orchestrator<'a> {
         }
         // Requests left by a previous orchestrator have no worker waiting on them.
         self.expire_permission_requests(&actor, None);
+        self.expected_branch = self.runner.checkout().as_deref().and_then(current_branch);
         let result = self.main_loop(&actor, stop);
         self.shutdown(&actor);
         result
@@ -371,7 +378,38 @@ impl<'a> Orchestrator<'a> {
         }
     }
 
+    /// Whether the main checkout can take a worker's fast-forward. A problem is announced once
+    /// (notification, log, supervisor) and dispatch waits; it is re-checked every pass, so work
+    /// resumes as soon as the checkout is put right.
+    fn main_checkout_ready(&mut self) -> bool {
+        let Some(main) = self.runner.checkout() else { return true };
+        match check_main_checkout(&main, self.expected_branch.as_deref()) {
+            Ok(()) => {
+                if self.checkout_problem.take().is_some() {
+                    eprintln!("main checkout is fine again; dispatching resumes");
+                    self.tell_supervisor("The main checkout is fine again; dispatch has resumed.".into());
+                }
+                true
+            }
+            Err(problem) => {
+                if self.checkout_problem.as_deref() != Some(&problem) {
+                    eprintln!("not dispatching: {problem}");
+                    self.notifier.notify(
+                        "Workyard: dispatch is waiting on the main checkout",
+                        &format!("{problem}. Workers merge into it, so no new card starts until it is clean, on its branch and not mid-merge."),
+                    );
+                    self.tell_supervisor(format!("Dispatch is paused: {problem}."));
+                    self.checkout_problem = Some(problem);
+                }
+                false
+            }
+        }
+    }
+
     fn dispatch_all(&mut self, actor: &str, stop: &AtomicBool) -> Result<()> {
+        if !self.main_checkout_ready() {
+            return Ok(());
+        }
         while !stop.load(Ordering::SeqCst) {
             let session_id = uuid::Uuid::new_v4().to_string();
             let worker = format!("agent:{}-{}", self.runner.name(), &session_id[..8]);
@@ -516,18 +554,16 @@ impl<'a> Orchestrator<'a> {
     /// Where this card's worker works, for its prompt: real paths when the runner has a
     /// repository, and whether the board wants human review of commits.
     fn prompt_context(&self, key: &str) -> PromptContext {
-        let review = self
-            .store
-            .list_boards()
-            .ok()
-            .and_then(|boards| {
-                let list = boards.as_array().cloned().or_else(|| boards["boards"].as_array().cloned())?;
-                list.into_iter().find(|b| b["key"] == self.board.as_str())
-            })
-            .is_some_and(|board| board["review_required"] == true);
+        let board = self.store.list_boards().ok().and_then(|boards| {
+            let list = boards.as_array().cloned().or_else(|| boards["boards"].as_array().cloned())?;
+            list.into_iter().find(|b| b["key"] == self.board.as_str())
+        });
+        let review = board.as_ref().is_some_and(|board| board["review_required"] == true);
+        let rebase = board.as_ref().is_some_and(|board| board["integration"] == "rebase");
         let main = self.runner.checkout();
         PromptContext {
             review,
+            rebase,
             branch: branch_for(key),
             worktree: main.as_ref().map(|m| worktree_path(m, key)),
             target: main.as_deref().and_then(current_branch),
@@ -793,7 +829,7 @@ impl<'a> Orchestrator<'a> {
                 card_key: "SUPERVISOR".into(),
                 actor: format!("agent:supervisor-{}", self.board.to_lowercase()),
                 session_id,
-                prompt: supervisor_prompt(&self.board, &self.opts.permissions),
+                prompt: supervisor_prompt(&self.board, &self.opts.permissions, self.prompt_context("").rebase),
                 resume: false,
                 workspace: Workspace::None,
                 allow_rules: Vec::new(),
@@ -848,6 +884,8 @@ impl<'a> Orchestrator<'a> {
 struct PromptContext {
     /// The board wants a human to approve commits before they are merged.
     review: bool,
+    /// The board integrates by rebasing the card branch onto the target, not merging the target in.
+    rebase: bool,
     branch: String,
     main: Option<PathBuf>,
     worktree: Option<PathBuf>,
@@ -863,8 +901,16 @@ fn integration_steps(key: &str, ctx: &PromptContext) -> String {
         .unwrap_or_else(|| "the first entry of `git worktree list`".into());
     let target = ctx.target.clone().unwrap_or_else(|| "main".into());
     let branch = &ctx.branch;
+    let (bring, why) = if ctx.rebase {
+        (
+            format!("run `git rebase {target}` and resolve any conflicts yourself (`git rebase --continue`), never leaving a merge commit"),
+            "This board keeps history linear: rebase, do not merge.",
+        )
+    } else {
+        (format!("run `git merge {target}` and resolve any conflicts yourself"), "")
+    };
     format!(
-        "Finishing means your work is on {target}. Loop: (1) in your worktree run `git merge {target}` and resolve any conflicts yourself, \
+        "Finishing means your work is on {target}. {why} Loop: (1) in your worktree {bring}, \
 then run the project's tests; (2) run `git -C {main} merge --ff-only {branch}`; if it refuses because {target} moved meanwhile, go back to (1). \
 Then run `workyard task move {key} Done`; it is refused with `not_integrated` until your branch is on {target}. \
 If the repository documents a merge queue or merge train (CONTRIBUTING, CLAUDE.md, docs/), follow that instead of step (2); if your work lands later, \
@@ -938,7 +984,12 @@ Do not raise a question for a mechanical blocker; fix it or work around it.",
 }
 
 /// What the supervisor agent is told once at start. It is woken later by event digests.
-fn supervisor_prompt(board: &str, permissions: &str) -> String {
+fn supervisor_prompt(board: &str, permissions: &str, rebase: bool) -> String {
+    let integration = if rebase {
+        "Workers on this board integrate by rebasing onto the target, so a note about a conflict should say to rebase, not merge."
+    } else {
+        "Workers on this board integrate by merging the target into their branch."
+    };
     format!(
         "You are the supervisor agent for Workyard board {board}. A script runs the board (leases, worker processes, \
 limits, backoff); you do the thinking it cannot. You stay running. Messages arrive as lists of board events that \
@@ -946,14 +997,32 @@ need judgement: a worker that kept exiting unfinished, a question, a refused too
 Between messages do nothing and spend nothing.\n\
 Use only the `workyard` CLI (read with `--json`: `board {board}`, `card <key>`, `questions {board}`, `events`). You may:\n\
 - steer a worker with `workyard task note <card> \"...\"`: a note reaches a running worker at its next step. Say concretely how to get \
-around the problem (use Write/Edit instead of a heredoc, a different command, resolve the merge conflict, run the tests another way).\n\
+around the problem (use Write/Edit instead of a heredoc, a different command, resolve the conflict, run the tests another way).\n\
 - answer an engineering question with `workyard admin answer` ONLY when its kind is engineering, it has a recommended option, and you \
 agree with it. Every other question (business, stakeholder, a choice that costs money or changes scope) is for the human: do nothing, \
 they are already notified.\n\
 - note on a card what you learned when a card keeps failing, so the human can read it.\n\
 You must NOT: approve changes or reviews, move cards between lanes, cancel or force-release cards, change code or files, run git, \
 start or stop processes, or answer for a human. If something needs one of those, leave a note on the card saying what and why. \
-Permissions for workers are `{permissions}`. Keep every action small and say in one line what you did and why.\n\
+Permissions for workers are `{permissions}`. {integration} Keep every action small and say in one line what you did and why.\n\
 Reply 'ready' now."
     )
+}
+
+#[cfg(test)]
+mod integration_prompt_tests {
+    use super::*;
+
+    fn ctx(rebase: bool) -> PromptContext {
+        PromptContext { review: false, rebase, branch: "workyard/c-1".into(), main: None, worktree: None, target: Some("main".into()) }
+    }
+
+    #[test]
+    fn prompt_follows_the_boards_integration() {
+        let merge = integration_steps("C-1", &ctx(false));
+        assert!(merge.contains("git merge main") && !merge.contains("git rebase"));
+        let rebase = integration_steps("C-1", &ctx(true));
+        assert!(rebase.contains("git rebase main") && !rebase.contains("git merge main"));
+        assert!(rebase.contains("--ff-only") && rebase.contains("not_integrated"));
+    }
 }

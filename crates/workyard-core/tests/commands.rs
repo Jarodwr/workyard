@@ -338,7 +338,7 @@ fn v7_database_gets_phases_and_preserves_existing_work() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        21
     );
 }
 
@@ -861,7 +861,7 @@ fn existing_v1_database_migrates_to_agent_types_and_notes() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, 21);
 }
 
 #[test]
@@ -2007,7 +2007,7 @@ fn supervisor_limits_are_enforced_in_the_core() {
 /// Put the database back to schema 17, as an older binary leaves it: no version on the lease.
 fn downgrade_to_17(dir: &TempDir) {
     let db = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
-    db.execute_batch("ALTER TABLE orchestrator_sessions DROP COLUMN binary_version; ALTER TABLE orchestrator_sessions DROP COLUMN schema_version; ALTER TABLE orchestrator_sessions DROP COLUMN worker_env_keys; ALTER TABLE boards DROP COLUMN worker_env; DELETE FROM schema_version WHERE version IN (18,19); PRAGMA user_version = 17").unwrap();
+    db.execute_batch("ALTER TABLE orchestrator_sessions DROP COLUMN binary_version; ALTER TABLE orchestrator_sessions DROP COLUMN schema_version; DELETE FROM schema_version WHERE version>=18; DROP TABLE card_reports; ALTER TABLE orchestrator_sessions DROP COLUMN worker_env_keys; ALTER TABLE boards DROP COLUMN worker_env; ALTER TABLE boards DROP COLUMN integration; PRAGMA user_version = 17").unwrap();
 }
 
 #[test]
@@ -2015,7 +2015,7 @@ fn lease_records_the_binary_version_and_release_clears_it() {
     let (_dir, store, board) = setup();
     let lease = store.orchestrator_acquire(&board, "run", "h", None, 30, None).unwrap();
     assert_eq!(lease["binary_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(lease["schema_version"], 19);
+    assert_eq!(lease["schema_version"], 21);
     let released = store.orchestrator_release(lease["actor"].as_str().unwrap(), &board).unwrap();
     assert!(released["schema_version"].is_null());
 }
@@ -2066,4 +2066,25 @@ fn board_worker_env_stores_values_but_reports_and_records_names_only() {
     for bad in ["NOEQUALS", "1A=x", "A-B=x", "WORKYARD_DB=x", "=x"] {
         assert_eq!(workyard_core::parse_env_pair(bad).unwrap_err().code, "validation_error", "{bad}");
     }
+}
+
+#[test]
+fn card_report_is_stored_replaced_and_limited() {
+    let (_dir, store, board) = setup();
+    let card = store.create_card("cli", &board, "Investigate", "", "P2", None).unwrap();
+    let key = card["key"].as_str().unwrap();
+    assert!(store.view_card(key).unwrap()["report"].is_null());
+    let first = store.set_card_report("agent:one", key, "# Findings\n\n- one").unwrap();
+    assert_eq!(first["version"], 1);
+    store.set_card_report("agent:one", key, "# Findings\n\n- two").unwrap();
+    let view = store.view_card(key).unwrap();
+    assert_eq!(view["report"]["body"], "# Findings\n\n- two");
+    assert_eq!(view["report"]["version"], 2);
+    assert_eq!(view["version"], card["version"], "a report does not change the card version");
+    let events = view["events"].as_array().unwrap();
+    assert_eq!(events.iter().filter(|e| e["type"] == "card_report_set").count(), 2);
+    assert!(store.set_card_report("agent:one", key, "  \n").is_err());
+    let huge = "x".repeat(256 * 1024 + 1);
+    assert_eq!(store.set_card_report("agent:one", key, &huge).unwrap_err().code, "validation_error");
+    assert!(store.set_card_report("agent:one", key, &"x".repeat(256 * 1024)).is_ok());
 }

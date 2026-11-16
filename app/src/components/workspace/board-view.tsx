@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { loadViewState, pickPhaseFilter, saveViewState } from "@/lib/view-state";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -30,6 +31,8 @@ type Props = {
   stakeholders: Project["stakeholders"];
   view: BoardSection;
   phaseId: string | null;
+  /** Database path the dock, phase filter and zoom are remembered under. */
+  scope: string;
   cues: Record<string, string>;
   orchestrator: Orchestrator | null;
   onOrchestratorState: (state: Orchestrator["desired_state"]) => void;
@@ -41,6 +44,7 @@ type Props = {
   onHold: (card: Card) => Promise<boolean>;
   onAddNote: (card: Card, body: string) => Promise<boolean>;
   onReviewRequired: (required: boolean) => void;
+  onIntegration: (integration: "merge" | "rebase") => void;
   onOpen: (id: string) => void;
   onAnswer: (question: Question, answer: string, note: string) => Promise<boolean>;
   onAssignStakeholder: (question: Question, stakeholderId: string) => Promise<boolean>;
@@ -63,6 +67,7 @@ export function BoardView({
   stakeholders,
   view,
   phaseId,
+  scope,
   cues,
   orchestrator,
   onOrchestratorState,
@@ -74,6 +79,7 @@ export function BoardView({
   onHold,
   onAddNote,
   onReviewRequired,
+  onIntegration,
   onOpen,
   onAnswer,
   onAssignStakeholder,
@@ -82,15 +88,20 @@ export function BoardView({
 }: Props) {
   const reduced = useReducedMotion();
   const [agentsOpen, setAgentsOpen] = useState(() => {
+    const saved = loadViewState(scope).agentsOpen;
+    if (saved !== undefined) return saved;
     try { return window.localStorage.getItem("workyard.agentsDock") === "1"; } catch { return false; }
   });
   useEffect(() => {
-    try { window.localStorage.setItem("workyard.agentsDock", agentsOpen ? "1" : "0"); } catch { /* storage unavailable: the dock still works */ }
-  }, [agentsOpen]);
+    saveViewState(scope, { agentsOpen });
+  }, [scope, agentsOpen]);
   const runningAgents = boardAgents(board).filter(isRunning).length;
   const phase = board.phases.find((item)=>item.id===phaseId) ?? board.phases.find((item)=>item.status==="current") ?? board.phases[0];
-  const [phaseFilter, setPhaseFilter] = useState("all");
-  const [showCompleted, setShowCompleted] = useState(false);
+  const [phaseFilter, setPhaseFilter] = useState(() => pickPhaseFilter(loadViewState(scope).phaseFilter, board.phases.map((item) => item.id)));
+  const [showCompleted, setShowCompleted] = useState(() => loadViewState(scope).showCompleted ?? false);
+  useEffect(() => {
+    saveViewState(scope, { phaseFilter, showCompleted });
+  }, [scope, phaseFilter, showCompleted]);
   const visiblePhases = board.phases.filter((item) => showCompleted || item.status !== "closed");
   const completedCount = board.phases.filter((item) => item.status === "closed").length;
   const graphControls = (
@@ -135,6 +146,8 @@ export function BoardView({
         onToggleAgents={() => setAgentsOpen((value) => !value)}
         reviewRequired={board.review_required === true}
         onReviewRequired={onReviewRequired}
+        integration={board.integration ?? "merge"}
+        onIntegration={onIntegration}
       />
       <div className="flex min-h-0 flex-1 gap-3">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -152,6 +165,7 @@ export function BoardView({
             showCompleted={showCompleted}
             onOpenInTerminal={onOpenInTerminal}
             onReleaseHold={onReleaseHold}
+            scope={scope}
           />
         </div>
       ) : (

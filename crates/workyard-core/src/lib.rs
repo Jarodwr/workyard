@@ -490,6 +490,14 @@ impl Store {
             notes.push(row?);
         }
         output["notes"] = json!(notes);
+        output["report"] = db
+            .query_row(
+                "SELECT body,actor,version,updated_at FROM card_reports WHERE card_id=?1",
+                [&card_id],
+                |r| Ok(json!({"body":r.get::<_,String>(0)?,"actor":r.get::<_,String>(1)?,"version":r.get::<_,i64>(2)?,"updated_at":r.get::<_,String>(3)?})),
+            )
+            .optional()?
+            .unwrap_or(Value::Null);
         output["session"] = json!(sessions::active_session(&db, &card_id)?);
         output["events"] = self.history_for_card_with_db(&db, &card_id, 0, 20)?;
         Ok(output)
@@ -535,6 +543,41 @@ impl Store {
         )?;
         self.commit(tx)?;
         Ok(note)
+    }
+
+    /// Store (or replace) the card's markdown report; one event per change.
+    pub fn set_card_report(&self, actor: &str, card: &str, body: &str) -> Result<Value> {
+        require_nonblank("actor", actor)?;
+        require_nonblank("report", body)?;
+        if body.len() > MAX_REPORT_BYTES {
+            return Err(Error::new(
+                "validation_error",
+                format!("report is {} bytes; the limit is {MAX_REPORT_BYTES} (256 KB)", body.len()),
+            ));
+        }
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let card_id = resolve_card(&tx, card)?;
+        let board_id: String =
+            tx.query_row("SELECT board_id FROM cards WHERE id=?1", [&card_id], |r| {
+                r.get(0)
+            })?;
+        check_board_active(&tx, &board_id)?;
+        let previous: Option<i64> = tx
+            .query_row("SELECT version FROM card_reports WHERE card_id=?1", [&card_id], |r| r.get(0))
+            .optional()?;
+        let version = previous.unwrap_or(0) + 1;
+        let report = json!({"card_id":card_id,"body":body,"actor":actor,"version":version,"updated_at":now()});
+        tx.execute(
+            "INSERT INTO card_reports(card_id,board_id,body,actor,version,updated_at) VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(card_id) DO UPDATE SET body=excluded.body,actor=excluded.actor,version=excluded.version,updated_at=excluded.updated_at",
+            params![card_id, board_id, body, actor, version, report["updated_at"].as_str()],
+        )?;
+        // The event carries the size, not the body, so the history stays small.
+        let summary = json!({"card_id":card_id,"actor":actor,"version":version,"bytes":body.len()});
+        record(&tx, actor, "card_report_set", &board_id, "card", &card_id, None, Some(&summary), &[], "")?;
+        self.commit(tx)?;
+        Ok(report)
     }
 
     pub fn create_card(
@@ -1676,7 +1719,9 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
-pub(crate) const SCHEMA_VERSION: i64 = 19;
+pub(crate) const SCHEMA_VERSION: i64 = 21;
+/// Largest markdown report a card may hold.
+pub const MAX_REPORT_BYTES: usize = 256 * 1024;
 
 fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -1888,6 +1933,24 @@ fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 19")?;
+        version = 19;
+    }
+    if version == 19 {
+        tx.execute_batch(include_str!("../migrations/020.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (20,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 20")?;
+        version = 20;
+    }
+    if version == 20 {
+        tx.execute_batch(include_str!("../migrations/021.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (21,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 21")?;
     }
     tx.commit()?;
     Ok(())
@@ -2019,7 +2082,7 @@ fn ensure_work_lane(db: &Connection, lane_id: &str) -> Result<()> {
     }
 }
 fn board_row(db: &Connection, id: &str) -> Result<Value> {
-    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required,phase_window FROM boards WHERE id=?1", [id], |r| Ok(json!({"phase_window":r.get::<_,Option<i64>>(10)?,"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
+    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required,phase_window,integration FROM boards WHERE id=?1", [id], |r| Ok(json!({"integration":r.get::<_,String>(11)?,"phase_window":r.get::<_,Option<i64>>(10)?,"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
 }
 fn card_row(db: &Connection, id: &str) -> Result<Value> {
     Ok(serde_json::to_value(card_snapshot(db, id)?)?)

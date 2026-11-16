@@ -130,6 +130,12 @@ enum TaskCommand {
         card: String,
         body: String,
     },
+    #[command(about = "Store a markdown report on the card, replacing the previous one (max 256 KB)")]
+    Report {
+        card: String,
+        #[arg(long, help = "Read the report from this file; without it, from stdin")]
+        file: Option<PathBuf>,
+    },
     Update {
         card: String,
         #[arg(long, help = "Required unless you own the card")]
@@ -256,6 +262,12 @@ enum ReviewSetting {
     Off,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum IntegrationSetting {
+    Merge,
+    Rebase,
+}
+
 /// How much workers may do without asking.
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Permissions {
@@ -298,6 +310,9 @@ enum PlanCommand {
         #[arg(long)]
         unset: Vec<String>,
     },
+    /// How workers bring a card branch onto the target: `merge` the target into it (default;
+    /// leaves a merge commit) or `rebase` it onto the target (linear history).
+    BoardIntegration { board: String, setting: IntegrationSetting },
     AttachBoard {
         board: String,
         project: String,
@@ -711,6 +726,20 @@ fn run_task(store: &Store, actor: &str, command: TaskCommand) -> workyard_core::
             expected_version,
         } => store.update_progress(actor, &card, progress, note.as_deref(), expected_version)?,
         TaskCommand::Note { card, body } => store.add_card_note(actor, &card, &body)?,
+        TaskCommand::Report { card, file } => {
+            let body = match file {
+                Some(path) => std::fs::read_to_string(&path).map_err(|e| {
+                    Error::new("validation_error", format!("cannot read {}: {e}", path.display()))
+                })?,
+                None => {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                        .map_err(|e| Error::new("validation_error", format!("cannot read stdin: {e}")))?;
+                    text
+                }
+            };
+            store.set_card_report(actor, &card, &body)?
+        }
         TaskCommand::Update {
             card,
             expected_version,
@@ -856,6 +885,13 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
         }
         PlanCommand::BoardReview { board, setting } => {
             store.set_board_review_required(actor, &board, matches!(setting, ReviewSetting::On))?
+        }
+        PlanCommand::BoardIntegration { board, setting } => {
+            let setting = match setting {
+                IntegrationSetting::Merge => "merge",
+                IntegrationSetting::Rebase => "rebase",
+            };
+            store.set_board_integration(actor, &board, setting)?
         }
         PlanCommand::BoardPhaseWindow { board, window } => {
             let window = workyard_core::parse_phase_window(&window)?;

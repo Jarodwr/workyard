@@ -1,4 +1,9 @@
--- Environment variables every worker of a board is started with (a JSON object), and the
--- variable names the running orchestrator passes (never the values), for `orch status`.
-ALTER TABLE boards ADD COLUMN worker_env TEXT NOT NULL DEFAULT '{}';
-ALTER TABLE orchestrator_sessions ADD COLUMN worker_env_keys TEXT NOT NULL DEFAULT '[]';
+-- One markdown report per card (the write-up of an investigation), replaced as a whole; version counts the changes.
+CREATE TABLE card_reports (
+  card_id TEXT PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,
+  board_id TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 262144),
+  actor TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);

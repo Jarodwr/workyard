@@ -652,6 +652,26 @@ fn integration_problem(repo: &str, branch: &str, target: &str, commit: &str) -> 
 }
 
 impl Store {
+    /// Choose how workers bring a card branch onto the target: `merge` or `rebase`.
+    pub fn set_board_integration(&self, actor: &str, board: &str, integration: &str) -> Result<Value> {
+        if integration != "merge" && integration != "rebase" {
+            return Err(Error::new("invalid_integration", "integration must be merge or rebase"));
+        }
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_board_active(&tx, &board_id)?;
+        let before = board_row(&tx, &board_id)?;
+        if before["integration"] == integration {
+            return Ok(before);
+        }
+        tx.execute("UPDATE boards SET integration=?2,version=version+1 WHERE id=?1", params![board_id, integration])?;
+        let after = board_row(&tx, &board_id)?;
+        record(&tx, actor, "board_integration_changed", &board_id, "board", &board_id, Some(&before), Some(&after), &[], "")?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
     /// Turn human review of commits on or off for a board. New changes linked afterwards
     /// default to it; existing changes keep their own setting.
     pub fn set_board_review_required(&self, actor: &str, board: &str, required: bool) -> Result<Value> {
