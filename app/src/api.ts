@@ -1,6 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type Blocker = { type: "card" | "question"; id: string; key: string; title: string; cancelled?: boolean };
+/** The session summary on a board card. Fields after `held_by` are newer and may be missing. */
+export type CardSession = {
+  runner: string;
+  paused: boolean;
+  held_by: string | null;
+  waiting_review?: boolean;
+  waiting_integration?: boolean;
+  waiting_question_key?: string | null;
+  /** What the worker is doing right now, as published by the orchestrator. */
+  activity?: string;
+  activity_at?: string | null;
+  attached_at?: string | null;
+  paused_at?: string | null;
+};
 export type Card = {
   id: string;
   key: string;
@@ -27,13 +41,13 @@ export type Card = {
   can_finish?: boolean;
   open_question_count: number;
   workspace?: "worktree" | "none";
-  session?: { runner: string; paused: boolean; held_by: string | null } | null;
+  session?: CardSession | null;
   stale?: boolean;
   last_activity_at?: string;
 };
 export type Lane = { id: string; name: string; kind: string; position: number; version: number; cards: Card[] };
 export type Phase = { id: string; board_id: string; name: string; description: string; version: number; closed_at: string | null; position: number; status: "closed" | "current" | "future" };
-export type Board = { id: string; key: string; name: string; description: string; version: number; archived: boolean; project_id?: string | null; current_phase_id?: string | null; phases: Phase[]; lanes: Lane[] };
+export type Board = { id: string; key: string; name: string; description: string; version: number; archived: boolean; review_required?: boolean; project_id?: string | null; current_phase_id?: string | null; phases: Phase[]; lanes: Lane[] };
 export type ProjectListItem = { id: string; name: string; description: string; version: number; board_count: number };
 export type Project = ProjectListItem & {
   boards: { id: string; key: string; name: string; description: string; archived: boolean }[];
@@ -49,7 +63,9 @@ export type EventPage = { events: BoardEvent[]; cursor: number; has_more: boolea
 export type Question = { id: string; key: string; board_id: string; phase_id: string; stakeholder_id?: string | null; stakeholder?: { name: string; role: string; contact: string }; kind: "engineering" | "business"; title: string; body: string; options: string[]; recommended_option: string; recommendation_reason: string; status: string; answer: string; answer_note: string; version: number; blocks: string[] };
 export type Dependency = { id: string; from_card_id: string; to_card_id: string | null; to_question_id: string | null; scope?: "start" | "finish" };
 export type CardChange = { id: string; version: number; repository_id: string; working_branch: string; target_branch: string; commit_oid: string; review_required: boolean; approved_commit_oid: string | null; reviewer: string | null };
-export type Orchestrator = { board_key: string; desired_state: "running" | "paused" | "draining"; pool_size: number; connected: boolean; holder: string | null; epoch: number; heartbeat_at: string | null; backing_off: boolean; backoff_until: string | null; backoff_reason: string };
+export type Orchestrator = { board_key: string; desired_state: "running" | "paused" | "draining"; pool_size: number; connected: boolean; holder: string | null; epoch: number; heartbeat_at: string | null; backing_off: boolean; backoff_until: string | null; backoff_reason: string; permissions?: "full" | "safe" };
+/** One readable line of a worker's output, parsed from its stream-json log. */
+export type AgentLogRow = { kind: "text" | "tool" | "result" | "error" | "user"; text: string; tool?: string };
 export type CardNote = { id: string; card_id: string; actor: string; body: string; created_at: string };
 export type TaskSession = { id: string; card_id: string; owner_actor: string; runner: string; external_session_id: string; attached_at: string; paused_at: string | null; waiting_question_id: string | null; waiting_question_key: string | null; last_delivered_event_id: number; detached_at: string | null; held_by?: string | null };
 export type CardDetail = Card & { dependencies: Dependency[]; changes: CardChange[]; notes: CardNote[]; session: TaskSession | null; events: { id: number; type: string; actor: string; ts: string }[] };
@@ -72,6 +88,9 @@ export const api = {
   startOrchestrator: (board: string) => invoke<Orchestrator>("start_orchestrator", { board }),
   stopOrchestrator: (board: string) => invoke<Orchestrator>("stop_orchestrator", { board }),
   releaseSessionHold: (card: string) => invoke<TaskSession>("release_session_hold", { card }),
+  holdSession: (card: string) => invoke<TaskSession>("hold_session", { card }),
+  agentLogTail: (card: string, limit = 60) => invoke<AgentLogRow[]>("agent_log_tail", { card, limit }),
+  setBoardReviewRequired: (board: string, required: boolean) => invoke<Board>("set_board_review_required", { board, required }),
   approveChange: (change: CardChange) => invoke<CardChange>("approve_change", { change: change.id, expectedVersion: change.version }),
   orchestratorStatus: (board: string) => invoke<Orchestrator>("orchestrator_status", { board }),
   setOrchestratorState: (board: string, state: Orchestrator["desired_state"]) => invoke<Orchestrator>("set_orchestrator_state", { board, state }),
@@ -87,7 +106,10 @@ let demoBoard: Board = {
       { id: "demo-1", key: "C-1", board_id: "demo-board", phase_id: "demo-phase", lane_id: "backlog", position: 0, title: "Build the event stream", description: "One event per action, with effects.", priority: "P1", blocking_impact: 0, progress: 30, status_note: "Schema is ready", agent_type: "Engineering", owner_actor: null, version: 1, blocked: false, ready: true, blockers: [], open_question_count: 0 },
       { id: "demo-2", key: "C-2", board_id: "demo-board", phase_id: "demo-phase-2", lane_id: "backlog", position: 1, title: "Wire the desktop board", description: "Keep card state stable across lane moves.", priority: "P2", blocking_impact: 0, progress: 0, status_note: "", agent_type: "Frontend", owner_actor: null, version: 1, blocked: false, ready: true, blockers: [], finish_blockers: [{type:"card",id:"demo-1",key:"C-1",title:"Build the event stream"}], can_finish:false, open_question_count: 0 },
     ] },
-    { id: "active", name: "In Progress", kind: "active", position: 1, version: 1, cards: [] },
+    { id: "active", name: "In Progress", kind: "active", position: 1, version: 1, cards: [
+      { id: "demo-3", key: "C-3", board_id: "demo-board", phase_id: "demo-phase", lane_id: "active", position: 0, title: "Storage module", description: "Persist todos.", priority: "P1", blocking_impact: 0, progress: 0, status_note: "", agent_type: "Engineering", owner_actor: "agent:claude-demo3", version: 1, blocked: false, ready: true, blockers: [], open_question_count: 0, can_finish: true, session: { runner: "claude", paused: false, held_by: null, activity: "running node --test", activity_at: new Date().toISOString(), attached_at: new Date(Date.now() - 4 * 60_000).toISOString() } },
+      { id: "demo-4", key: "C-4", board_id: "demo-board", phase_id: "demo-phase", lane_id: "active", position: 1, title: "Wire up the UI", description: "Connect model and storage.", priority: "P1", blocking_impact: 0, progress: 100, status_note: "", agent_type: "Frontend", owner_actor: "agent:claude-demo4", version: 1, blocked: false, ready: true, blockers: [], open_question_count: 0, can_finish: false, review_gates: [{ change_id: "demo-change", working_branch: "workyard/c-4", commit_oid: "84f9584", approved: false, reviewer: null }], session: { runner: "claude", paused: true, held_by: null, waiting_review: true, attached_at: new Date(Date.now() - 20 * 60_000).toISOString() } },
+    ] },
     { id: "done", name: "Done", kind: "done", position: 2, version: 1, cards: [] },
   ],
 };
@@ -117,7 +139,7 @@ let demoQuestions: Question[] = [
 ];
 let demoDependencies: Dependency[] = [{id:"demo-dep-1",from_card_id:"demo-2",to_card_id:"demo-1",to_question_id:null,scope:"finish"}];
 let demoNotes: CardNote[] = [];
-let demoOrchestrator: Orchestrator = { board_key: "B-1", desired_state: "running", pool_size: 2, connected: true, holder: "cli:demo", epoch: 1, heartbeat_at: null, backing_off: false, backoff_until: null, backoff_reason: "" };
+let demoOrchestrator: Orchestrator = { board_key: "B-1", desired_state: "running", pool_size: 2, connected: true, holder: "cli:demo", epoch: 1, heartbeat_at: null, backing_off: false, backoff_until: null, backoff_reason: "", permissions: "full" };
 const clone = <T,>(value: T): T => structuredClone(value);
 function demoFindCard(id: string): Card {
   const card = demoBoard.lanes.flatMap((lane) => lane.cards).find((c) => c.id === id || c.key === id);
@@ -133,6 +155,16 @@ const demoApi = {
   startOrchestrator: async (_board: string): Promise<Orchestrator> => { throw new Error("Starting an orchestrator needs the desktop app"); },
   stopOrchestrator: async (_board: string): Promise<Orchestrator> => { throw new Error("Stopping an orchestrator needs the desktop app"); },
   releaseSessionHold: async (_card: string): Promise<TaskSession> => { throw new Error("Releasing a hold needs the desktop app"); },
+  holdSession: async (_card: string): Promise<TaskSession> => { throw new Error("Stopping an agent needs the desktop app"); },
+  agentLogTail: async (card: string, _limit = 60): Promise<AgentLogRow[]> => [
+    { kind: "user", text: `You are working Workyard card ${card} on board B-1.` },
+    { kind: "text", text: "I'll read the card, then write the storage module and its tests." },
+    { kind: "tool", tool: "Bash", text: "workyard --json card " + card },
+    { kind: "tool", tool: "Write", text: "storage.mjs" },
+    { kind: "tool", tool: "Bash", text: "node --test" },
+    { kind: "result", text: "ℹ tests 10  ℹ pass 10  ℹ fail 0" },
+  ],
+  setBoardReviewRequired: async (board: string, required: boolean): Promise<Board> => { const target = [demoBoard, demoRuntimeBoard, demoResearchBoard].find((item) => item.key === board || item.id === board) ?? demoBoard; target.review_required = required; demoEvent("board_review_changed", target.id); return clone(target); },
   approveChange: async (change: CardChange): Promise<CardChange> => ({ ...clone(change), approved_commit_oid: change.commit_oid, reviewer: "demo", version: change.version + 1 }),
   orchestratorStatus: async (board: string): Promise<Orchestrator> => ({ ...clone(demoOrchestrator), board_key: board }),
   setOrchestratorState: async (board: string, state: Orchestrator["desired_state"]): Promise<Orchestrator> => { demoOrchestrator = { ...demoOrchestrator, desired_state: state }; demoEvent("orchestrator_state_changed", board); return { ...clone(demoOrchestrator), board_key: board }; },

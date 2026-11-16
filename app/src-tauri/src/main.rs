@@ -110,17 +110,18 @@ fn open_in_terminal(card: String) -> Result<Value, String> {
     let repo = repository_for_board(&store, detail["board_id"].as_str().unwrap_or_default())
         .or_else(|| std::env::var("HOME").ok())
         .unwrap_or_else(|| ".".into());
-    let worktree = if detail["workspace"] == "none" { String::new() } else { format!(" --worktree {}", shell_quote(&key)) };
+    // A worker runs in `<repo>/.workyard/worktrees/<key>`; resume there so Claude Code finds the session.
+    let worktree_dir = std::path::Path::new(&repo).join(".workyard/worktrees").join(&key);
+    let repo = if detail["workspace"] != "none" && worktree_dir.is_dir() { worktree_dir.to_string_lossy().into_owned() } else { repo };
     let script = format!(
         "#!/bin/zsh\ncd {repo} || exit 1\nexport WORKYARD_DB={db}\nexport WORKYARD_ACTOR={actor}\n\
 echo 'Workyard: you are driving {key}. Exit Claude when done, then choose Release hold in Workyard.'\n\
-claude --resume {session}{worktree}\n",
+claude --resume {session}\n",
         repo = shell_quote(&repo),
         db = shell_quote(&store.path().to_string_lossy()),
         actor = shell_quote(detail["owner_actor"].as_str().unwrap_or("human")),
         key = key,
         session = shell_quote(&session_id),
-        worktree = worktree,
     );
     // A .command file opens in whichever terminal is the user's default for such files.
     let path = std::env::temp_dir().join(format!("workyard-{key}.command"));
@@ -272,6 +273,168 @@ fn release_session_hold(card: String) -> Result<Value, String> {
     wrap(store()?.release_task_session_hold("ui", &card))
 }
 
+
+/// Stop an agent without opening a terminal: hold its session, which pauses it, makes the
+/// orchestrator stop its worker, and keeps it from being resumed until the hold is released.
+#[tauri::command]
+fn hold_session(card: String) -> Result<Value, String> {
+    let who = std::env::var("USER").unwrap_or_else(|_| "human".into());
+    wrap(store()?.hold_task_session("ui", &card, &who))
+}
+
+/// Require (or stop requiring) human review of the code changes on a board's cards.
+#[tauri::command]
+fn set_board_review_required(board: String, required: bool) -> Result<Value, String> {
+    wrap(store()?.set_board_review_required("ui", &board, required))
+}
+
+fn clip(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// What a tool call acted on, in a few words: the command, the file, or the pattern.
+fn tool_summary(input: &Value) -> String {
+    for field in ["command", "file_path", "path", "pattern", "url", "description", "prompt"] {
+        if let Some(text) = input[field].as_str() {
+            return clip(text, 160);
+        }
+    }
+    clip(&input.to_string(), 160)
+}
+
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Turn one stream-json line from a worker's log into readable rows. Anything unrecognised
+/// (system events, usage, thinking) is dropped.
+fn log_rows(line: &str) -> Vec<Value> {
+    let Ok(event) = serde_json::from_str::<Value>(line) else { return Vec::new() };
+    let row = |kind: &str, text: String, tool: Option<&str>| {
+        let mut row = serde_json::json!({"kind": kind, "text": text});
+        if let Some(tool) = tool {
+            row["tool"] = Value::String(tool.to_owned());
+        }
+        row
+    };
+    let mut rows = Vec::new();
+    match event["type"].as_str().unwrap_or_default() {
+        "assistant" => {
+            for part in event["message"]["content"].as_array().into_iter().flatten() {
+                match part["type"].as_str().unwrap_or_default() {
+                    "text" => {
+                        let text = clip(part["text"].as_str().unwrap_or_default(), 600);
+                        if !text.is_empty() {
+                            rows.push(row("text", text, None));
+                        }
+                    }
+                    "tool_use" => rows.push(row(
+                        "tool",
+                        tool_summary(&part["input"]),
+                        Some(part["name"].as_str().unwrap_or("tool")),
+                    )),
+                    _ => {}
+                }
+            }
+        }
+        "user" => match &event["message"]["content"] {
+            Value::String(text) => rows.push(row("user", clip(text, 300), None)),
+            Value::Array(parts) => {
+                for part in parts {
+                    match part["type"].as_str().unwrap_or_default() {
+                        "tool_result" => {
+                            let text = clip(&result_text(&part["content"]), 300);
+                            if part["is_error"] == true {
+                                rows.push(row("error", text, None));
+                            } else if !text.is_empty() {
+                                rows.push(row("result", text, None));
+                            }
+                        }
+                        "text" => rows.push(row("user", clip(part["text"].as_str().unwrap_or_default(), 300), None)),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        },
+        "result" => {
+            let text = clip(event["result"].as_str().unwrap_or_default(), 400);
+            if event["is_error"] == true {
+                rows.push(row("error", if text.is_empty() { "The worker ended with an error".into() } else { text }, None));
+            } else if !text.is_empty() {
+                rows.push(row("text", text, None));
+            }
+        }
+        "rate_limit_event" if event["rate_limit_info"]["status"] == "rejected" => {
+            rows.push(row("error", "Usage limit reached".into(), None));
+        }
+        _ => {}
+    }
+    rows
+}
+
+/// The newest worker log for a card: `<db>.logs/<CARD>-<session>.log`.
+fn newest_log(store: &Store, card: &str) -> Option<std::path::PathBuf> {
+    let mut dir = store.path().as_os_str().to_owned();
+    dir.push(".logs");
+    let prefix = format!("{card}-");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with(&prefix) && name.ends_with(".log")
+        })
+        .max_by_key(|entry| entry.metadata().and_then(|m| m.modified()).ok())
+        .map(|entry| entry.path())
+}
+
+/// The last `limit` readable rows of a card's worker log. Only the end of the file is read,
+/// since a long run's log is large.
+#[tauri::command]
+fn agent_log_tail(card: String, limit: usize) -> Result<Value, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    if card.is_empty() || !card.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("not a card key".into());
+    }
+    let store = store()?;
+    let Some(path) = newest_log(&store, &card.to_uppercase()) else {
+        return Ok(Value::Array(Vec::new()));
+    };
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next(); // the first line is cut off
+    }
+    let mut rows: Vec<Value> = lines.flat_map(log_rows).collect();
+    let keep = limit.clamp(1, 500);
+    if rows.len() > keep {
+        rows.drain(..rows.len() - keep);
+    }
+    Ok(Value::Array(rows))
+}
+
 /// A human approves the current commit of a linked change. Agents have no command for this.
 #[tauri::command]
 fn approve_change(change: String, expected_version: i64) -> Result<Value, String> {
@@ -323,9 +486,40 @@ fn main() {
             start_orchestrator,
             stop_orchestrator,
             release_session_hold,
+            hold_session,
+            agent_log_tail,
+            set_board_review_required,
             orchestrator_status,
             set_orchestrator_state
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Workyard");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_calls_results_and_errors_become_rows() {
+        let call = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Running the tests"},{"type":"tool_use","name":"Bash","input":{"command":"node --test"}}]}}"#;
+        let rows = log_rows(call);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["kind"], "text");
+        assert_eq!(rows[1]["tool"], "Bash");
+        assert_eq!(rows[1]["text"], "node --test");
+
+        let denied = r#"{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"requires approval"}]}}"#;
+        assert_eq!(log_rows(denied)[0]["kind"], "error");
+        let ok = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"pass 10"}]}]}}"#;
+        assert_eq!(log_rows(ok)[0]["text"], "pass 10");
+    }
+
+    #[test]
+    fn noise_and_garbage_are_dropped_and_long_text_is_clipped() {
+        assert!(log_rows(r#"{"type":"system","subtype":"init"}"#).is_empty());
+        assert!(log_rows("not json").is_empty());
+        let long = format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#, "x".repeat(2000));
+        assert!(log_rows(&long)[0]["text"].as_str().unwrap().chars().count() <= 601);
+    }
 }

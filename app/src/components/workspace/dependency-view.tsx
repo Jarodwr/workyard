@@ -5,12 +5,14 @@ import {
 } from "lucide-react";
 import { client, type Board, type Card, type Dependency, type Project, type Question } from "@/api";
 import { AgentTerminalButton } from "@/components/workspace/agent-terminal-button";
+import { stateTone } from "@/components/workspace/agents-dock";
+import { agentState } from "@/lib/agents";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard } from "@/components/ui/card";
 import { StakeholderPicker } from "@/components/workspace/question-card";
 import {
-  buildPhaseDependencyLayout, GRAPH_NODE_HEIGHT, GRAPH_NODE_WIDTH, questionOnlyBlockerCounts,
+  buildPhaseDependencyLayout, GRAPH_NODE_HEIGHT, GRAPH_NODE_WIDTH, questionOnlyBlockerCounts, routeDependencyEdges,
   traceDependencies, type GraphEdgeInput, type GraphNodeInput,
 } from "@/lib/dependency-layout";
 import { cn } from "@/lib/utils";
@@ -43,11 +45,16 @@ export function DependencyView({
   const graphScrollRef = useRef<HTMLDivElement>(null);
   const cards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
   const visiblePhases = board.phases.filter((phase) => showCompleted || phase.status !== "closed");
+  // The board is re-read on every wake so session activity shows live, but edges only change
+  // when a card does (adding or removing a dependency bumps its version), so only then reload them.
+  const cardSignature = useMemo(() => cards.map((card) => `${card.id}:${card.version}`).join(","), [cards]);
+  const cardsRef = useRef(cards);
+  cardsRef.current = cards;
 
   useEffect(() => {
     let active = true;
     setLoadError(false);
-    void Promise.all(cards.map((card) => client.viewCard(card.key)))
+    void Promise.all(cardsRef.current.map((card) => client.viewCard(card.key)))
       .then((details) => {
         if (!active) return;
         const unique = new Map<string, Dependency>();
@@ -61,7 +68,7 @@ export function DependencyView({
       .catch(() => { if (active) setLoadError(true); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [cards]);
+  }, [cardSignature]);
 
   useEffect(() => setSelectedId(null), [board.id]);
   // A new phase selection starts from the top with nothing traced.
@@ -124,6 +131,7 @@ export function DependencyView({
   const selected = selectedId ? layout.nodes.find((node) => node.id === selectedId) : null;
   const trace = selected ? traceDependencies(layout, selected.id) : null;
   const nodeById = new Map(layout.nodes.map((node) => [node.id, node]));
+  const routes = useMemo(() => routeDependencyEdges(layout.nodes, layout.edges), [layout]);
   const cardById = new Map(cards.map((card) => [card.id, card]));
   const questionById = new Map(questions.map((question) => [question.id, question]));
   const answering = answeringId ? questionById.get(answeringId) : undefined;
@@ -156,20 +164,12 @@ export function DependencyView({
                   <marker id="arrow-resolved" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="var(--muted-foreground)" /></marker>
                   <marker id="arrow-finish" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="#6366f1" /></marker>
                 </defs>
-                {layout.edges.map((edge, index) => {
+                {layout.edges.map((edge) => {
                   const from = nodeById.get(edge.source);
                   const to = nodeById.get(edge.target);
                   if (!from || !to) return null;
-                  const x1 = from.x + GRAPH_NODE_WIDTH;
-                  const y1 = from.y + GRAPH_NODE_HEIGHT / 2;
-                  const x2 = to.x;
-                  const y2 = to.y + GRAPH_NODE_HEIGHT / 2;
-                  const gutter = x1 + Math.max(16, Math.min(46, (x2 - x1) / 2));
-                  const crossPhase = from.phase_id !== to.phase_id || x2 - x1 > 130;
-                  const channel = 46 + (index % 8) * 6;
-                  const path = crossPhase
-                    ? `M ${x1} ${y1} H ${x1 + 16} V ${channel} H ${x2 - 22} V ${y2} H ${x2 - 8}`
-                    : `M ${x1} ${y1} H ${gutter} V ${y2} H ${x2 - 8}`;
+                  const path = routes.get(edge.id)?.d;
+                  if (!path) return null;
                   const focused = !trace || (trace.related.has(edge.source) && trace.related.has(edge.target));
                   const arrow = edge.scope === "finish" && !edge.resolved ? "finish" : edge.longestChain ? "sequence" : edge.resolved ? "resolved" : "open";
                   return (
@@ -191,11 +191,15 @@ export function DependencyView({
                 const question = questionById.get(node.id);
                 const questionOnlyCount = questionOnlyCounts.get(node.id) ?? 0;
                 const focused = !trace || trace.related.has(node.id);
+                const agent = card ? agentState(card) : null;
+                const running = agent?.kind === "running";
                 return (
                   <div
                     key={node.id}
+                    data-agent-state={agent?.kind}
                     className={cn(
                       "absolute border shadow-sm transition-[opacity,box-shadow]",
+                      running && "node-running",
                       question ? "rounded-xl border-l-4" : "rounded-lg bg-card",
                       question?.kind === "engineering" ? "border-sky-500/70 bg-sky-500/10" : question?.kind === "business" ? "border-amber-500/70 bg-amber-500/10" : undefined,
                       node.chokepoint ? "ring-1 ring-violet-500/40" : node.kind === "card" && (node.longestChain ? "border-primary/60" : "border-border"),
@@ -211,10 +215,16 @@ export function DependencyView({
                       <span className="flex w-full items-center gap-1.5 pr-8 text-[10px] text-muted-foreground">
                         {question ? <CircleHelp className={cn("size-3.5", question.kind === "engineering" ? "text-sky-700 dark:text-sky-300" : "text-amber-700 dark:text-amber-300")} /> : node.cancelled ? <X className="size-3.5" /> : node.resolved ? <Check className="size-3.5 text-primary" /> : card?.blocked ? <LockKeyhole className="size-3.5 text-amber-600" /> : <Bot className="size-3.5" />}
                         <span className={cn("font-semibold", question?.kind === "engineering" && "text-sky-800 dark:text-sky-200", question?.kind === "business" && "text-amber-800 dark:text-amber-200")}>{question ? question.kind === "engineering" ? "Engineering" : "Business" : "Task"}</span>
-                        {node.chokepoint && <Badge variant="outline" className="ml-auto border-violet-500/30 bg-violet-500/10 px-1 py-0 text-[9px] text-violet-700 dark:text-violet-300"><GitFork className="size-3" />Holds {node.impact}</Badge>}
+                        {agent && (
+                          <span className={cn("ml-auto inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-[9px] font-semibold leading-3", stateTone[agent.kind])} title={agent.label}>
+                            {running && <span className="agent-running-dot size-1.5 rounded-full bg-primary" aria-hidden />}
+                            {agent.chip}
+                          </span>
+                        )}
+                        {node.chokepoint && <Badge variant="outline" className={cn(agent ? "" : "ml-auto", "border-violet-500/30 bg-violet-500/10 px-1 py-0 text-[9px] text-violet-700 dark:text-violet-300")}><GitFork className="size-3" />Holds {node.impact}</Badge>}
                       </span>
                       <strong className="mt-1 line-clamp-2 w-full text-xs leading-4">{node.title}</strong>
-                      <span className="mt-auto w-full truncate pr-5 text-[10px] text-muted-foreground">{node.cancelled ? `Cancelled: ${card?.cancellation_reason ?? ""}` : card ? node.detail : questionOnlyCount > 0 ? `Only questions block ${questionOnlyCount} task${questionOnlyCount === 1 ? "" : "s"}` : question?.recommended_option ? `Suggests: ${question.recommended_option}` : node.resolved ? "Resolved" : "Open"}</span>
+                      <span className={cn("mt-auto w-full truncate pr-12 text-[10px] text-muted-foreground", running && card?.session?.activity && "text-primary")} title={running ? card?.session?.activity : undefined}>{node.cancelled ? `Cancelled: ${card?.cancellation_reason ?? ""}` : card ? (running && card.session?.activity ? card.session.activity : node.detail) : questionOnlyCount > 0 ? `Only questions block ${questionOnlyCount} task${questionOnlyCount === 1 ? "" : "s"}` : question?.recommended_option ? `Suggests: ${question.recommended_option}` : node.resolved ? "Resolved" : "Open"}</span>
                     </button>
                     {question && <div className="absolute right-1.5 top-1.5"><StakeholderPicker question={question} stakeholders={stakeholders} compact onAssign={(stakeholderId)=>onAssignStakeholder(question,stakeholderId)} /></div>}
                     {card && <AgentTerminalButton card={card} onOpen={onOpenInTerminal} onRelease={onReleaseHold} className="absolute bottom-1.5 right-7" />}

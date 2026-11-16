@@ -256,3 +256,185 @@ export function traceDependencies(layout: DependencyLayout, selectedId: string) 
   visit(selectedId, "downstream", downstream);
   return { upstream, downstream, related: new Set([selectedId, ...upstream, ...downstream]) };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Wire routing. Wires are orthogonal: leave the prerequisite's right side, run in the gutter
+// beside its column, and arrive at the dependent's left side. A wire whose straight run would
+// cross another card travels along a free corridor between rows instead. Parallel wires get
+// their own track so unrelated wires never share a line; wires from one card (or into one card)
+// share a trunk, so they read as a branch or a merge rather than as overlapping lines.
+
+export type Point = [number, number];
+export type RoutedEdge = { d: string; points: Point[] };
+
+const CLEARANCE = 6; // space kept between a wire and a card
+const TRACK = 5; // distance between parallel wires
+const GUTTER_INSET = 14; // first track's distance from a card's side
+const TOP_BAND_PENALTY = 60; // corridors above the first row sit under the sticky phase header
+
+/** Does a horizontal run at `y` between `xa` and `xb` touch a card other than `skip`? */
+function runHitsCard(nodes: LayoutNode[], xa: number, xb: number, y: number, skip: string): boolean {
+  const lo = Math.min(xa, xb);
+  const hi = Math.max(xa, xb);
+  return nodes.some(
+    (node) =>
+      node.id !== skip &&
+      node.x - CLEARANCE < hi && node.x + GRAPH_NODE_WIDTH + CLEARANCE > lo &&
+      node.y - CLEARANCE < y && node.y + GRAPH_NODE_HEIGHT + CLEARANCE > y,
+  );
+}
+
+/** Offsets 0, +TRACK, -TRACK, +2*TRACK, ... for the n-th wire sharing a corridor. */
+function trackOffset(n: number): number {
+  return n === 0 ? 0 : (n % 2 === 1 ? 1 : -1) * Math.ceil(n / 2) * TRACK;
+}
+
+/** Give each interval the lowest track number not used by an overlapping interval. */
+function colourIntervals<T extends { start: number; end: number }>(items: T[]): Map<T, number> {
+  const trackEnds: number[] = [];
+  const result = new Map<T, number>();
+  for (const item of [...items].sort((a, b) => a.start - b.start || a.end - b.end)) {
+    let track = trackEnds.findIndex((end) => end < item.start - 4);
+    if (track < 0) track = trackEnds.length;
+    trackEnds[track] = item.end;
+    result.set(item, track);
+  }
+  return result;
+}
+
+function roundedPath(raw: Point[], radius = 6): string {
+  const points = raw.filter((p, i) => i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1]);
+  let d = `M ${points[0][0]} ${points[0][1]}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const [px, py] = points[i - 1];
+    const [cx, cy] = points[i];
+    const [nx, ny] = points[i + 1];
+    const r = Math.min(radius, Math.hypot(cx - px, cy - py) / 2, Math.hypot(nx - cx, ny - cy) / 2);
+    d += ` L ${cx - Math.sign(cx - px) * r} ${cy - Math.sign(cy - py) * r}`;
+    d += ` Q ${cx} ${cy} ${cx + Math.sign(nx - cx) * r} ${cy + Math.sign(ny - cy) * r}`;
+  }
+  const last = points[points.length - 1];
+  return `${d} L ${last[0]} ${last[1]}`;
+}
+
+export function routeDependencyEdges(nodes: LayoutNode[], edges: GraphEdgeInput[]): Map<string, RoutedEdge> {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const minTop = nodes.length ? Math.min(...nodes.map((n) => n.y)) : 0;
+  const corridorYs = new Set<number>();
+  for (const node of nodes) {
+    corridorYs.add(node.y - (ROW_SPAN - GRAPH_NODE_HEIGHT) / 2);
+    corridorYs.add(node.y + GRAPH_NODE_HEIGHT + (ROW_SPAN - GRAPH_NODE_HEIGHT) / 2);
+  }
+  corridorYs.add(Math.max(64, minTop - 24));
+
+  type Route = {
+    edge: GraphEdgeInput; from: LayoutNode; to: LayoutNode;
+    x1: number; y1: number; x2: number; y2: number;
+    corridor: number | null; // y of the corridor run, or null for a direct run
+  };
+  const routes: Route[] = [];
+  for (const edge of [...edges].sort((a, b) => a.id.localeCompare(b.id))) {
+    const from = byId.get(edge.source);
+    const to = byId.get(edge.target);
+    if (!from || !to) continue;
+    const x1 = from.x + GRAPH_NODE_WIDTH;
+    const y1 = from.y + GRAPH_NODE_HEIGHT / 2;
+    const x2 = to.x;
+    const y2 = to.y + GRAPH_NODE_HEIGHT / 2;
+    // The straight run at the source's height, out to the gutter beside the dependent.
+    const directClear = !runHitsCard(nodes, x1, x2 - GUTTER_INSET, y1, from.id);
+    let corridor: number | null = null;
+    if (!directClear) {
+      let best = Infinity;
+      for (const y of corridorYs) {
+        if (runHitsCard(nodes, x1 + GUTTER_INSET, x2 - GUTTER_INSET, y, "")) continue;
+        const cost = Math.abs(y - y1) + Math.abs(y - y2) + (y < minTop - 8 ? TOP_BAND_PENALTY : 0);
+        if (cost < best) { best = cost; corridor = y; }
+      }
+      corridor ??= Math.max(64, minTop - 24); // nothing clear: take the top band regardless
+    }
+    routes.push({ edge, from, to, x1, y1, x2, y2, corridor });
+  }
+
+  // Parallel corridor runs: spread wires that share a corridor and overlap horizontally.
+  const corridorY = new Map<Route, number>();
+  const byCorridor = new Map<number, Route[]>();
+  for (const route of routes) {
+    if (route.corridor === null) continue;
+    byCorridor.set(route.corridor, [...(byCorridor.get(route.corridor) ?? []), route]);
+  }
+  for (const [y, group] of byCorridor) {
+    const items = group.map((route) => ({ route, start: route.x1, end: route.x2 }));
+    for (const [item, track] of colourIntervals(items)) corridorY.set(item.route, y + trackOffset(track));
+  }
+
+  // Vertical runs live in the gutters beside columns. Wires from one card share a trunk in its
+  // right gutter, wires into one card share one in its left gutter; everything else gets a track.
+  // `runYs` are the heights at which wires arrive at a trunk from the left; `endY` is the height
+  // an "in" trunk's wires leave it towards their card.
+  type Trunk = { key: string; gutter: number; start: number; end: number; side: "out" | "in"; runYs: Set<number>; endY: number };
+  const trunks = new Map<string, Trunk>();
+  const trunkFor = (key: string, gutter: number, side: "out" | "in", ya: number, yb: number, runY: number, endY: number) => {
+    const found = trunks.get(key);
+    const start = Math.min(ya, yb);
+    const end = Math.max(ya, yb);
+    if (found) { found.start = Math.min(found.start, start); found.end = Math.max(found.end, end); found.runYs.add(runY); }
+    else trunks.set(key, { key, gutter, side, start, end, runYs: new Set([runY]), endY });
+    return key;
+  };
+  const keys = new Map<Route, { out?: string; in?: string }>();
+  for (const route of routes) {
+    const yc = corridorY.get(route) ?? route.y1;
+    const used: { out?: string; in?: string } = {};
+    if (route.corridor !== null && yc !== route.y1) used.out = trunkFor(`out:${route.from.id}:${route.x1}`, route.x1, "out", route.y1, yc, route.y1, yc);
+    const lastFrom = route.corridor !== null ? yc : route.y1;
+    if (lastFrom !== route.y2) used.in = trunkFor(`in:${route.to.id}:${route.x2}`, route.x2, "in", lastFrom, route.y2, lastFrom, route.y2);
+    keys.set(route, used);
+  }
+  const trackOf = new Map<string, number>();
+  const byGutter = new Map<string, Trunk[]>();
+  for (const trunk of trunks.values()) {
+    const id = `${trunk.side}:${trunk.gutter}`;
+    byGutter.set(id, [...(byGutter.get(id) ?? []), trunk]);
+  }
+  for (const group of byGutter.values()) {
+    // A wire running at height h into trunk A must stay clear of the last stretch into any card
+    // centred at h, and that stretch starts at its own trunk: so A has to sit further left.
+    const mustBeLeftOf = (a: Trunk, b: Trunk) => a !== b && a.side === "in" && b.side === "in" && a.runYs.has(b.endY);
+    const order: Trunk[] = [];
+    const state = new Map<Trunk, "visiting" | "done">();
+    const visit = (trunk: Trunk) => {
+      if (state.has(trunk)) return; // already placed, or part of a cycle: ignore that constraint
+      state.set(trunk, "visiting");
+      for (const other of group) if (mustBeLeftOf(trunk, other)) visit(other);
+      state.set(trunk, "done");
+      order.push(trunk);
+    };
+    for (const trunk of [...group].sort((a, b) => a.start - b.start)) visit(trunk);
+    const placed: Trunk[] = [];
+    for (const trunk of order) {
+      let track = Math.max(0, ...group.filter((other) => mustBeLeftOf(trunk, other) && trackOf.has(other.key)).map((other) => trackOf.get(other.key)! + 1));
+      const taken = (t: number) => placed.some((other) => trackOf.get(other.key) === t && other.start - 4 <= trunk.end && other.end + 4 >= trunk.start);
+      while (taken(track)) track++;
+      trackOf.set(trunk.key, track);
+      placed.push(trunk);
+    }
+  }
+
+  const result = new Map<string, RoutedEdge>();
+  for (const route of routes) {
+    const used = keys.get(route)!;
+    const yc = corridorY.get(route) ?? route.y1;
+    const xIn = route.x2 - GUTTER_INSET - (used.in ? trackOf.get(used.in)! * TRACK : 0);
+    const end: Point = [route.x2 - 8, route.y2];
+    let points: Point[];
+    if (route.corridor === null) {
+      points = [[route.x1, route.y1], [xIn, route.y1], [xIn, route.y2], end];
+    } else {
+      const xOut = route.x1 + GUTTER_INSET + (used.out ? trackOf.get(used.out)! * TRACK : 0);
+      points = [[route.x1, route.y1], [xOut, route.y1], [xOut, yc], [xIn, yc], [xIn, route.y2], end];
+    }
+    result.set(route.edge.id, { d: roundedPath(points), points });
+  }
+  return result;
+}

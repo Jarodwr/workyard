@@ -50,6 +50,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const cursor = useRef(0);
+  const boardRef = useRef<Board | null>(null);
+  boardRef.current = board;
 
   const refresh = useCallback(
     async (key: string | null, selectedProject?: string | null) => {
@@ -163,7 +165,17 @@ export default function App() {
           const next = await client.orchestratorStatus(boardKey);
           if (active) setOrchestrator((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
         }
-        if (!active || events.length === 0) return;
+        if (!active) return;
+        if (events.length === 0) {
+          // A worker's live activity is stored without a board event, so a board with running
+          // sessions is reread on every wake, and only replaced when something changed.
+          const current = boardRef.current;
+          if (boardKey && current?.key === boardKey && current.lanes.some((lane) => lane.cards.some((card) => card.session && !card.session.paused))) {
+            const next = await client.viewBoard(boardKey);
+            if (active) setBoard((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+          }
+          return;
+        }
         await refresh(boardKey, projectId);
         if (!active) return;
         if (events.length <= 10) {
@@ -319,6 +331,9 @@ export default function App() {
               onPlan={() => void mutate(() => client.openPlanner(board.key))}
               onOpenInTerminal={(card) => mutate(() => client.openInTerminal(card.key))}
               onReleaseHold={(card) => mutate(() => client.releaseSessionHold(card.key))}
+              onHold={(card) => mutate(() => client.holdSession(card.key))}
+              onAddNote={(card, body) => mutate(() => client.addCardNote(card.key, body))}
+              onReviewRequired={(required) => void mutate(() => client.setBoardReviewRequired(board.key, required))}
               onOpen={setSelectedId}
               onAnswer={(question, answer, note) => mutate(() => client.answerQuestion(question, answer, note))}
               onAssignStakeholder={(question, stakeholderId) => mutate(() => stakeholderId ? client.assignQuestionStakeholder(question, stakeholderId) : client.unassignQuestionStakeholder(question))}

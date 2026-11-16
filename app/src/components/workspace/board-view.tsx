@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -15,11 +15,13 @@ import {
 } from "lucide-react";
 import type { Board, Card, Orchestrator, Project, Question } from "@/api";
 import { AgentTerminalButton } from "@/components/workspace/agent-terminal-button";
+import { AgentsDock } from "@/components/workspace/agents-dock";
 import { BoardToolbar } from "@/components/workspace/board-toolbar";
 import { DependencyView } from "@/components/workspace/dependency-view";
 import { Badge } from "@/components/ui/badge";
 import { Card as UiCard } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { boardAgents, isRunning } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -36,6 +38,9 @@ type Props = {
   onPlan: () => void;
   onOpenInTerminal: (card: Card) => Promise<boolean>;
   onReleaseHold: (card: Card) => Promise<boolean>;
+  onHold: (card: Card) => Promise<boolean>;
+  onAddNote: (card: Card, body: string) => Promise<boolean>;
+  onReviewRequired: (required: boolean) => void;
   onOpen: (id: string) => void;
   onAnswer: (question: Question, answer: string, note: string) => Promise<boolean>;
   onAssignStakeholder: (question: Question, stakeholderId: string) => Promise<boolean>;
@@ -66,6 +71,9 @@ export function BoardView({
   onPlan,
   onOpenInTerminal,
   onReleaseHold,
+  onHold,
+  onAddNote,
+  onReviewRequired,
   onOpen,
   onAnswer,
   onAssignStakeholder,
@@ -73,6 +81,13 @@ export function BoardView({
   onBackToGraph,
 }: Props) {
   const reduced = useReducedMotion();
+  const [agentsOpen, setAgentsOpen] = useState(() => {
+    try { return window.localStorage.getItem("workyard.agentsDock") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem("workyard.agentsDock", agentsOpen ? "1" : "0"); } catch { /* storage unavailable: the dock still works */ }
+  }, [agentsOpen]);
+  const runningAgents = boardAgents(board).filter(isRunning).length;
   const phase = board.phases.find((item)=>item.id===phaseId) ?? board.phases.find((item)=>item.status==="current") ?? board.phases[0];
   const [phaseFilter, setPhaseFilter] = useState("all");
   const [showCompleted, setShowCompleted] = useState(false);
@@ -115,7 +130,14 @@ export function BoardView({
         onStopOrchestrator={onStopOrchestrator}
         onPlan={onPlan}
         showLegend={view === "dependencies"}
+        agentsOpen={agentsOpen}
+        runningAgents={runningAgents}
+        onToggleAgents={() => setAgentsOpen((value) => !value)}
+        reviewRequired={board.review_required === true}
+        onReviewRequired={onReviewRequired}
       />
+      <div className="flex min-h-0 flex-1 gap-3">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {view === "dependencies" ? (
         <div className="min-h-0 flex-1">
           <DependencyView
@@ -259,6 +281,21 @@ export function BoardView({
           </LayoutGroup>
         </div>
       )}
+      </div>
+      {agentsOpen && (
+        <AgentsDock
+          board={board}
+          questions={questions}
+          onClose={() => setAgentsOpen(false)}
+          onOpenCard={onOpen}
+          onAnswer={onAnswer}
+          onAddNote={onAddNote}
+          onOpenInTerminal={onOpenInTerminal}
+          onReleaseHold={onReleaseHold}
+          onHold={onHold}
+        />
+      )}
+      </div>
     </div>
   );
 }

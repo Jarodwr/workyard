@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ClipboardList, Hourglass, Info, Pause, Play, Square, Waves } from "lucide-react";
+import { Bot, ClipboardList, Hourglass, Info, Pause, Play, Settings2, ShieldAlert, ShieldCheck, Square, Waves } from "lucide-react";
 import type { Orchestrator } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Popover } from "@/components/ui/popover";
@@ -16,19 +16,60 @@ type Props = {
   onPlan: () => void;
   /** The legend explains the graph's lines, so only the graph shows it. */
   showLegend: boolean;
+  agentsOpen: boolean;
+  runningAgents: number;
+  onToggleAgents: () => void;
+  reviewRequired: boolean;
+  onReviewRequired: (required: boolean) => void;
 };
 
 /** One slim bar: view controls on the left, legend, orchestrator and planner on the right. */
-export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState, onStartOrchestrator, onStopOrchestrator, onPlan, showLegend }: Props) {
+export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState, onStartOrchestrator, onStopOrchestrator, onPlan, showLegend, agentsOpen, runningAgents, onToggleAgents, reviewRequired, onReviewRequired }: Props) {
   return (
     <div className="mb-2 flex shrink-0 items-center gap-2 rounded-lg border bg-card px-2.5 py-1.5 text-xs">
       <div className="flex min-w-0 flex-1 items-center gap-3">{left}</div>
       {showLegend && <LegendButton />}
+      <Button size="sm" variant="ghost" className={cn("h-7 gap-1.5 px-2 text-xs", agentsOpen && "bg-accent")} onClick={onToggleAgents} aria-pressed={agentsOpen} title="Show or hide the agents dock">
+        <Bot className="size-3.5" /> Agents
+        {runningAgents > 0 && <span className="rounded-full bg-primary px-1.5 text-[10px] font-semibold tabular-nums leading-4 text-primary-foreground" aria-label={`${runningAgents} running`}>{runningAgents}</span>}
+      </Button>
+      <SettingsButton orchestrator={orchestrator} reviewRequired={reviewRequired} onReviewRequired={onReviewRequired} />
       <OrchestratorControls boardKey={boardKey} orchestrator={orchestrator} onState={onOrchestratorState} onStart={onStartOrchestrator} onStop={onStopOrchestrator} />
       <Button size="sm" variant="outline" className="h-7 gap-1.5 px-2.5 text-xs" onClick={onPlan} title="Open a planner agent in your terminal, pointed at this board">
         <ClipboardList className="size-3.5" /> Plan
       </Button>
     </div>
+  );
+}
+
+function SettingsButton({ orchestrator, reviewRequired, onReviewRequired }: { orchestrator: Orchestrator | null; reviewRequired: boolean; onReviewRequired: (required: boolean) => void }) {
+  const full = orchestrator?.permissions !== "safe";
+  return (
+    <Popover
+      trigger={({ open, toggle }) => (
+        <Button size="icon" variant="ghost" className={cn("size-7", open && "bg-accent")} onClick={toggle} aria-expanded={open} aria-label="Board settings" title="Worker permissions and review">
+          <Settings2 className="size-3.5" />
+        </Button>
+      )}
+      className="w-80"
+    >
+      <p className="mb-2 font-medium text-foreground">Workers</p>
+      <p className="flex items-start gap-2 text-muted-foreground">
+        {full ? <ShieldAlert className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-300" /> : <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-emerald-600" />}
+        <span>
+          <strong className="text-foreground">{full ? "Full access" : "Safe"}</strong>
+          {full
+            ? ": workers run without permission prompts. A worktree isolates git state, not your machine."
+            : ": workers may only use the tools on the allowlist; anything else is refused."}
+          {!orchestrator?.connected && " Set when the orchestrator starts."}
+        </span>
+      </p>
+      <p className="mb-2 mt-3 border-t pt-3 font-medium text-foreground">Review</p>
+      <label className="flex cursor-pointer items-start gap-2 text-muted-foreground">
+        <input type="checkbox" className="mt-0.5" checked={reviewRequired} onChange={(event) => onReviewRequired(event.target.checked)} />
+        <span><strong className="text-foreground">Require review before merge</strong>: new code changes wait for your approval in the card. Off by default for local projects.</span>
+      </label>
+    </Popover>
   );
 }
 
@@ -66,7 +107,7 @@ function OrchestratorControls({ boardKey, orchestrator, onState, onStart, onStop
         className="text-muted-foreground"
         title={connected ? `Orchestrator ${orchestrator.holder ?? ""}` : `Start one with: workyard orch run ${boardKey} --cwd <repository>`}
       >
-        {label}
+        {label}{connected && orchestrator.permissions && ` · ${orchestrator.permissions === "safe" ? "Safe" : "Full access"}`}
       </span>
       {orchestrator.backing_off && (
         <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-300" title={orchestrator.backoff_reason}>

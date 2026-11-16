@@ -126,6 +126,64 @@ button:disabled {
     box-shadow: 0 1px 3px #0002;
   }
 }
+
+/* A graph node whose agent is running: a soft pulsing ring and a light sweeping along its
+   bottom edge. Motion is decoration only; the "Running" chip carries the state. */
+.node-running {
+  overflow: hidden;
+  border-color: var(--primary);
+  animation: node-running-ring 2.4s ease-in-out infinite;
+}
+.node-running::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent) 0 0 / 40% 100% no-repeat;
+  animation: node-running-sweep 1.8s linear infinite;
+}
+.agent-running-dot {
+  animation: agent-dot 1.4s ease-in-out infinite;
+}
+@keyframes node-running-ring {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary), transparent 55%);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in oklch, var(--primary), transparent 100%);
+  }
+}
+@keyframes node-running-sweep {
+  from {
+    background-position: -60% 0;
+  }
+  to {
+    background-position: 160% 0;
+  }
+}
+@keyframes agent-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .node-running,
+  .node-running::after,
+  .agent-running-dot {
+    animation: none;
+  }
+  .node-running::after {
+    background: var(--primary);
+    opacity: 0.6;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -10,11 +10,15 @@ import {
   X,
 } from "lucide-react";
 import type { Board, Card, CardChange, CardDetail as Detail, Question } from "@/api";
+import { AgentLog } from "@/components/workspace/agent-log";
+import { stateTone } from "@/components/workspace/agents-dock";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
+import { agentState } from "@/lib/agents";
+import { cn } from "@/lib/utils";
 
 type Props = {
   card: Card | null;
@@ -141,6 +145,22 @@ export function CardDetail({
                   ) : null}
                 </UiCard>
               )}
+              {card.session && (() => {
+                const state = agentState(card)!;
+                return (
+                  <section className="mt-3 space-y-1.5" aria-label="Live agent">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-semibold">Live</h3>
+                      <span className={cn("inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-[10px] font-medium", stateTone[state.kind])}>
+                        {state.kind === "running" && <span className="agent-running-dot size-1.5 rounded-full bg-primary" aria-hidden />}
+                        {state.label}
+                      </span>
+                    </div>
+                    {card.session.activity && state.kind === "running" && <p className="truncate text-xs text-muted-foreground" title={card.session.activity}>{card.session.activity}</p>}
+                    <AgentLog cardKey={card.key} />
+                  </section>
+                );
+              })()}
               {card.blocked && (
                 <UiCard className="mt-3 border-amber-500/25 bg-amber-500/5 p-3 shadow-none">
                   <p className="flex items-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-300">
