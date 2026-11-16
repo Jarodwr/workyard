@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use workyard_core::{BoardFilter, DEFAULT_LEASE_SECONDS, Error, Store};
-use workyard_orchestrator::{ClaudeRunner, Options, Orchestrator, hostname};
+use workyard_orchestrator::{ClaudeRunner, MacNotifier, Options, Orchestrator, Silent, hostname};
 
 #[derive(Parser)]
 #[command(name = "workyard", about = "Local kanban for work with AI agents")]
@@ -148,6 +148,16 @@ enum TaskCommand {
         agent_type: Option<String>,
         #[arg(long)]
         lane: Option<String>,
+        /// worktree (default: its own git worktree and branch) or none (investigative work)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Choose where a card's worker runs: worktree (default) or none for investigations.
+    Workspace {
+        card: String,
+        workspace: String,
+        #[arg(long, help = "Required unless you own the card")]
+        expected_version: Option<i64>,
     },
     Depend {
         card: String,
@@ -320,6 +330,9 @@ enum OrchCommand {
         /// Consecutive failed runs before a card's session is detached
         #[arg(long, default_value_t = 3)]
         max_failures: u32,
+        /// Do not send desktop notifications
+        #[arg(long)]
+        no_notify: bool,
     },
     /// Show the board's orchestrator: state, cursor, pool size, and lease.
     Status { board: String },
@@ -484,6 +497,15 @@ enum SessionCommand {
         waiting_question: Option<String>,
     },
     Resume { card: String },
+    /// Take the session over (for example in a terminal). It stays paused and is never offered
+    /// for resume, and the orchestrator stops its worker, until you release the hold.
+    Hold {
+        card: String,
+        #[arg(long, default_value = "human")]
+        by: String,
+    },
+    /// Give a held session back; the orchestrator resumes it with everything it missed.
+    ReleaseHold { card: String },
     Ack {
         card: String,
         #[arg(long)]
@@ -589,16 +611,33 @@ fn run_task(store: &Store, actor: &str, command: TaskCommand) -> workyard_core::
             desc,
             agent_type,
             lane,
-        } => store.create_card_in_phase(
-            actor,
-            &board,
-            &title,
-            &desc,
-            "P2",
-            lane.as_deref(),
-            agent_type.as_deref().unwrap_or(""),
-            phase.as_deref(),
-        )?,
+            workspace,
+        } => {
+            let card = store.create_card_in_phase(
+                actor,
+                &board,
+                &title,
+                &desc,
+                "P2",
+                lane.as_deref(),
+                agent_type.as_deref().unwrap_or(""),
+                phase.as_deref(),
+            )?;
+            match workspace {
+                Some(workspace) => store.set_card_workspace(
+                    actor,
+                    card["key"].as_str().unwrap_or_default(),
+                    &workspace,
+                    card["version"].as_i64(),
+                )?,
+                None => card,
+            }
+        }
+        TaskCommand::Workspace {
+            card,
+            workspace,
+            expected_version,
+        } => store.set_card_workspace(actor, &card, &workspace, expected_version)?,
         TaskCommand::Depend {
             card,
             on,
@@ -760,7 +799,8 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             claude_args,
             cwd,
             max_failures,
-        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, cwd, max_failures)?,
+            no_notify,
+        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, cwd, max_failures, !no_notify)?,
         OrchCommand::Status { board } => store.orchestrator_status(&board)?,
         OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
         OrchCommand::Resume { board } => store.orchestrator_set_state(actor, &board, "running")?,
@@ -809,6 +849,8 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             SessionCommand::Attach { card, runner, session_id } => store.attach_task_session(actor, &card, &runner, &session_id)?,
             SessionCommand::Pause { card, waiting_question } => store.pause_task_session(actor, &card, waiting_question.as_deref())?,
             SessionCommand::Resume { card } => store.resume_task_session(actor, &card)?,
+            SessionCommand::Hold { card, by } => store.hold_task_session(actor, &card, &by)?,
+            SessionCommand::ReleaseHold { card } => store.release_task_session_hold(actor, &card)?,
             SessionCommand::Ack { card, through_event_id } => store.acknowledge_task_session(actor, &card, through_event_id)?,
             SessionCommand::Detach { card } => store.detach_task_session(actor, &card)?,
             SessionCommand::Briefing { card, limit, after } => store.task_session_briefing(&card, limit, after)?,
@@ -872,6 +914,7 @@ fn run_orchestrator(
     claude_args: Vec<String>,
     cwd: Option<PathBuf>,
     max_failures: u32,
+    notify: bool,
 ) -> workyard_core::Result<Value> {
     let db = store.path().to_path_buf();
     let mut log_dir = db.clone().into_os_string();
@@ -895,7 +938,11 @@ fn run_orchestrator(
         ..Options::default()
     };
     eprintln!("Orchestrating {board}. Press Ctrl-C to stop; workers are paused and the lease released.");
-    Orchestrator::new(store, board, Box::new(runner), options).run(&stop)?;
+    let notifier: Box<dyn workyard_orchestrator::Notifier> =
+        if notify { Box::new(MacNotifier) } else { Box::new(Silent) };
+    Orchestrator::new(store, board, Box::new(runner), options)
+        .with_notifier(notifier)
+        .run(&stop)?;
     Ok(json!({"stopped": true}))
 }
 

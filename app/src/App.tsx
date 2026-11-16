@@ -327,6 +327,8 @@ export default function App() {
         onClose={closeDetail}
         onAddNote={(card, body) => mutate(() => client.addCardNote(card.key, body))}
         onApproveChange={(change) => mutate(() => client.approveChange(change))}
+        onOpenInTerminal={(card) => mutate(() => client.openInTerminal(card.key))}
+        onReleaseHold={(card) => mutate(() => client.releaseSessionHold(card.key))}
       />
     </div>
   );

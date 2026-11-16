@@ -13,13 +13,13 @@ Workyard is a local kanban shared with humans. Use the `workyard` CLI with `--js
 2. Claim it if unclaimed: `workyard --json task claim C-12 --expected-version N`, then `task move C-12 "In Progress"`.
 3. Work. After each meaningful step report it: `workyard --json task progress C-12 40 --note "short status"`. Each write returns the card's new `version`; reuse it.
 4. If you need a human decision, do not guess. Ask: `workyard --json task ask <board> "Title" --kind engineering|business --option "A" --option "B" --recommend "A" --why "simple reason" --blocks C-12`. Give 2-10 real choices; `Other` is added for you. Then pause your session with `workyard orch session pause C-12 --waiting-question Q-3` and stop. The orchestrator resumes you when the question is answered, and the answer arrives in your briefing.
-5. Code changes: `task link-change C-12 <repository> <branch> --review-required`. After each new commit run `task update-change <change> <commit>`, which clears earlier approval. A human approves in the desktop app; you cannot approve your own change.
+5. Code changes: you are in your own git worktree on your own branch (`git branch --show-current`); commit there and never touch another checkout. Record the branch with `task link-change C-12 <repository-id> <your-branch> --review-required`, and after each new commit run `task update-change <change> <commit>`, which clears earlier approval. A human approves in the desktop app; you cannot approve your own change, and the card cannot reach Done until they do. Investigative cards (no worktree) change no repository: report with `task note` instead.
 6. Finish: `task move C-12 Done` only when the work is integrated and checks pass. Otherwise `task release C-12`.
 
 ## Rules
 
-- Add a note for a human with `task note C-12 "text"`. Notes never need a version.
+- Add a note for a human with `task note C-12 "text"`. Notes never need a version. Messages that arrive while you work are notes a human left on your card; treat them as instructions about it.
 - If a command fails with `version_conflict`, reread the card and retry. On `ownership_conflict`, stop; someone else owns it.
 - New work you discover: `task add-card <board> "Title"`; order it with `task depend`.
-- Only the planner role uses `plan`; only the orchestrator uses `orch`; `admin` is for humans.
+- Only the planner role uses `plan`; the only `orch` command you use is `orch session pause`; `admin` is for humans.
 - Reads: `boards`, `board <B-1>`, `card <C-1>`, `questions`, `history`.

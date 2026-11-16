@@ -11,7 +11,8 @@ use workyard_core::{DEFAULT_LEASE_SECONDS, Result, Store};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
-use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState};
+use crate::notify::{Notifier, Silent};
+use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState, Workspace};
 
 pub struct Options {
     pub holder: String,
@@ -69,6 +70,11 @@ pub struct Orchestrator<'a> {
     failures: HashMap<String, u32>,
     fast_failures: u32,
     limit_streak: u32,
+    notifier: Box<dyn Notifier>,
+    board_id: String,
+    /// Last board event this orchestrator has processed; persisted on the board so a restart
+    /// neither repeats nor misses notifications and messages.
+    cursor: i64,
 }
 
 struct Live {
@@ -87,7 +93,16 @@ impl<'a> Orchestrator<'a> {
             failures: HashMap::new(),
             fast_failures: 0,
             limit_streak: 0,
+            notifier: Box::new(Silent),
+            board_id: String::new(),
+            cursor: 0,
         }
+    }
+
+    /// Send desktop notifications for things that need a human.
+    pub fn with_notifier(mut self, notifier: Box<dyn Notifier>) -> Self {
+        self.notifier = notifier;
+        self
     }
 
     /// Run until `stop` is set or the lease is lost. Fails fast with `orchestrator_conflict`
@@ -102,6 +117,13 @@ impl<'a> Orchestrator<'a> {
             self.opts.pool,
         )?;
         let actor = lease["actor"].as_str().unwrap_or_default().to_owned();
+        self.board_id = lease["board_id"].as_str().unwrap_or_default().to_owned();
+        // The first run on a board starts from now rather than replaying its whole history.
+        self.cursor = lease["cursor"].as_i64().unwrap_or(0);
+        if self.cursor == 0 {
+            self.cursor = self.store.latest_event_id().unwrap_or(0);
+            let _ = self.store.orchestrator_set_cursor(&actor, &self.board, self.cursor);
+        }
         let result = self.main_loop(&actor, stop);
         self.shutdown(&actor);
         result
@@ -118,6 +140,12 @@ impl<'a> Orchestrator<'a> {
                 self.store
                     .orchestrator_heartbeat(actor, &self.board, self.opts.lease_seconds)?;
                 last_heartbeat = Instant::now();
+            }
+            self.pump_events(actor)?;
+            for live in self.live.values_mut() {
+                if live.worker.idle() {
+                    live.worker.close_input();
+                }
             }
             self.reap(actor);
             let status = self.store.orchestrator_status(&self.board)?;
@@ -230,6 +258,10 @@ impl<'a> Orchestrator<'a> {
     }
 
     fn set_backoff(&self, actor: &str, until: DateTime<Utc>, reason: &str) {
+        self.notifier.notify(
+            "Workyard is waiting",
+            &format!("{reason}. Dispatch resumes after {}.", until.with_timezone(&chrono::Local).format("%H:%M")),
+        );
         self.log_err(
             self.store
                 .orchestrator_set_backoff(actor, &self.board, Some(&until.to_rfc3339()), reason),
@@ -245,6 +277,7 @@ impl<'a> Orchestrator<'a> {
         let count = *count;
         if count >= self.opts.max_failures {
             self.failures.remove(key);
+            self.notifier.notify("Workyard: a card needs you", &format!("{key}: the worker {why} {count} times"));
             self.log_err(self.store.detach_task_session(actor, key), key);
             self.log_err(
                 self.store.add_card_note(
@@ -276,8 +309,9 @@ impl<'a> Orchestrator<'a> {
             match next["dispatch"].as_str() {
                 Some("claim") => {
                     let key = next["card"]["key"].as_str().unwrap_or_default().to_owned();
-                    let prompt = claim_prompt(&self.board, &key, &worker);
-                    self.launch(actor, &key, &worker, &session_id, prompt, false);
+                    let workspace = Workspace::from_card(&next["card"]);
+                    let prompt = claim_prompt(&self.board, &key, &worker, workspace);
+                    self.launch(actor, &key, &worker, &session_id, prompt, false, workspace);
                 }
                 Some("resume") => {
                     if !self.resume(actor, &next["card"]) {
@@ -299,6 +333,7 @@ impl<'a> Orchestrator<'a> {
         session_id: &str,
         prompt: String,
         resume: bool,
+        workspace: Workspace,
     ) -> bool {
         let launch = Launch {
             board_key: self.board.clone(),
@@ -307,6 +342,7 @@ impl<'a> Orchestrator<'a> {
             session_id: session_id.to_owned(),
             prompt,
             resume,
+            workspace,
         };
         match self.runner.start(&launch) {
             Ok(worker) => {
@@ -357,7 +393,8 @@ impl<'a> Orchestrator<'a> {
             return false; // another dispatcher won, or the wait is no longer resolved
         }
         let prompt = resume_prompt(&key, &pages);
-        if !self.launch(actor, &key, &owner, &session_id, prompt, true) {
+        let workspace = Workspace::from_card(card);
+        if !self.launch(actor, &key, &owner, &session_id, prompt, true, workspace) {
             return false;
         }
         for page in &pages {
@@ -366,6 +403,86 @@ impl<'a> Orchestrator<'a> {
             }
         }
         true
+    }
+
+    /// Read board events since the cursor: notify a human about what needs them, hand notes
+    /// to the worker on that card, and stop workers whose card was cancelled, taken away, or
+    /// taken over. The cursor is stored on the board so a restart carries on where it left off.
+    fn pump_events(&mut self, actor: &str) -> Result<()> {
+        loop {
+            let page = self.store.poll_events(self.cursor, 200)?;
+            for event in page["events"].as_array().into_iter().flatten() {
+                if event["board_id"] == self.board_id.as_str() {
+                    self.handle_event(event);
+                }
+            }
+            let next = page["cursor"].as_i64().unwrap_or(self.cursor);
+            if next > self.cursor {
+                self.cursor = next;
+                self.log_err(self.store.orchestrator_set_cursor(actor, &self.board, next), &self.board);
+            }
+            if page["has_more"] != true {
+                return Ok(());
+            }
+        }
+    }
+
+    fn card_key(&self, card_id: &str) -> Option<String> {
+        self.store.read_card(card_id).ok().map(|card| card.key)
+    }
+
+    fn stop_worker(&mut self, key: &str) {
+        if let Some(mut live) = self.live.remove(key) {
+            live.worker.stop();
+        }
+    }
+
+    fn handle_event(&mut self, event: &Value) {
+        let after = &event["after"];
+        let entity = event["entity_id"].as_str().unwrap_or_default();
+        match event["type"].as_str().unwrap_or_default() {
+            "question_raised" => self.notifier.notify(
+                "Workyard: a question needs you",
+                &format!("{}: {}", after["key"].as_str().unwrap_or("?"), after["title"].as_str().unwrap_or("")),
+            ),
+            "card_note_added" => {
+                let author = after["actor"].as_str().unwrap_or_default();
+                let Ok(card) = self.store.read_card(entity) else { return };
+                // Notes by the worker itself or by the orchestrator are not messages to it.
+                if author.starts_with("orch:") || Some(author) == card.owner_actor.as_deref() {
+                    return;
+                }
+                if let Some(live) = self.live.get_mut(&card.key) {
+                    let message = format!(
+                        "New note on {} from {author}: {}",
+                        card.key,
+                        after["body"].as_str().unwrap_or_default()
+                    );
+                    // If it cannot be delivered the note still reaches the worker in its
+                    // briefing when the session next resumes.
+                    let _ = live.worker.send(&message);
+                }
+            }
+            "card_cancelled" | "card_force_released" | "card_transferred" => {
+                if let Some(key) = self.card_key(entity) {
+                    self.stop_worker(&key);
+                }
+            }
+            "task_session_held" => {
+                let card_id = event["effects"][0]["card_id"].as_str().unwrap_or_default();
+                if let Some(key) = self.card_key(card_id) {
+                    self.stop_worker(&key);
+                }
+            }
+            "card_change_linked" | "card_change_updated" => {
+                let commit = after["commit_oid"].as_str().unwrap_or_default();
+                if after["review_required"] == true && !commit.is_empty() && after["approved_commit_oid"].as_str() != Some(commit) {
+                    let key = after["card_id"].as_str().and_then(|id| self.card_key(id)).unwrap_or_default();
+                    self.notifier.notify("Workyard: review needed", &format!("{key} has a commit waiting for your approval"));
+                }
+            }
+            _ => {}
+        }
     }
 
     fn shutdown(&mut self, actor: &str) {
@@ -388,12 +505,27 @@ impl<'a> Orchestrator<'a> {
     }
 }
 
-fn claim_prompt(board: &str, key: &str, actor: &str) -> String {
+fn claim_prompt(board: &str, key: &str, actor: &str, workspace: Workspace) -> String {
+    let place = match workspace {
+        Workspace::Worktree => format!(
+            "You work in your own git worktree on its own branch (see `git branch --show-current`); never touch another checkout. \
+Commit your work there. Once you have commits, record them with `workyard task link-change {key} <repository-id> <your-branch> --review-required` \
+(find the repository id with `workyard --json projects` then `workyard --json project <id>`), and run \
+`workyard task update-change <change> <commit>` after each further commit. A human approves the commit in the desktop app; \
+you cannot move the card to Done until they do."
+        ),
+        Workspace::None => format!(
+            "This card is investigative: do not modify any repository. Report what you find with `workyard task note {key} \"...\"` \
+and keep the status note current."
+        ),
+    };
     format!(
         "You are working Workyard card {key} on board {board}. Your actor is {actor} (set in WORKYARD_ACTOR); \
 the card is already claimed by you, In Progress, with this session attached.\n\
 Use the `workyard` CLI (the workyard skill describes it). Read the card with `workyard --json card {key}`, \
 do the work, and report with `workyard task progress {key} <0-100> --note \"...\"`.\n\
+{place}\n\
+Messages that arrive while you work are notes a human left on this card; treat them as instructions about it.\n\
 If you need a human decision, raise it with `workyard task ask ... --blocks {key}`, then run \
 `workyard orch session pause {key} --waiting-question <Q-key>` and stop. You will be resumed with the answer.\n\
 When finished, run `workyard task move {key} Done`. Do not work on other cards."

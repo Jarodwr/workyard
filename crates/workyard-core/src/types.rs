@@ -267,6 +267,8 @@ pub struct Card {
     pub updated_at: String,
     pub version: Version,
     pub agent_type: String,
+    /// `worktree` (default) or `none` for investigative work; see `set_card_workspace`.
+    pub workspace: String,
     pub blocked: bool,
     pub blockers: Vec<Blocker>,
     pub finish_blockers: Vec<Blocker>,

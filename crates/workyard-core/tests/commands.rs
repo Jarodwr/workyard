@@ -337,7 +337,7 @@ fn v7_database_gets_phases_and_preserves_existing_work() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
 }
 
@@ -799,7 +799,7 @@ fn existing_v1_database_migrates_to_agent_types_and_notes() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 }
 
 #[test]
@@ -1806,4 +1806,50 @@ fn backoff_stops_dispatch_until_it_expires_or_is_cleared_and_never_shortens() {
         store.orchestrator_set_backoff(&actor, &board, Some(&later), "x").unwrap_err().code,
         "stale_epoch"
     );
+}
+
+#[test]
+fn cards_default_to_a_worktree_and_investigations_opt_out() {
+    let (_dir, store, board) = setup();
+    let card = store.create_card("cli", &board, "Research", "", "P2", None).unwrap();
+    let key = card["key"].as_str().unwrap();
+    assert_eq!(card["workspace"], "worktree");
+    let err = store.set_card_workspace("cli", key, "somewhere", 1).unwrap_err();
+    assert_eq!(err.code, "validation_error");
+    let set = store.set_card_workspace("cli", key, "none", 1).unwrap();
+    assert_eq!(set["workspace"], "none");
+    assert_eq!(set["version"], 2);
+    // No change, no new version or event.
+    let events = store.latest_event_id().unwrap();
+    assert_eq!(store.set_card_workspace("cli", key, "none", 2).unwrap()["version"], 2);
+    assert_eq!(store.latest_event_id().unwrap(), events);
+    // Owner rules apply like any other card edit.
+    store.claim_card("agent:a", key, 2).unwrap();
+    assert_eq!(store.set_card_workspace("agent:b", key, "worktree", None::<i64>).unwrap_err().code, "ownership_conflict");
+    assert_eq!(store.set_card_workspace("agent:a", key, "worktree", None::<i64>).unwrap()["workspace"], "worktree");
+}
+
+#[test]
+fn a_held_session_is_never_offered_for_resume_until_released() {
+    let (_dir, store, board) = setup();
+    let card = store.create_card("cli", &board, "Takeover", "", "P2", None).unwrap();
+    let key = card["key"].as_str().unwrap();
+    store.claim_card("agent:a", key, 1).unwrap();
+    store.move_card("agent:a", key, "In Progress", None, None::<i64>).unwrap();
+    store.attach_task_session("agent:a", key, "claude", "sess").unwrap();
+
+    // Holding a running session pauses it and records who has it.
+    let held = store.hold_task_session("ui", key, "jarod").unwrap();
+    assert_eq!(held["held_by"], "jarod");
+    assert!(held["paused_at"].is_string());
+    assert_eq!(store.hold_task_session("ui", key, "someone-else").unwrap_err().code, "session_held");
+    // A general pause would normally be offered at once; a hold is not.
+    assert!(store.next_ready_task(&board, None).unwrap().is_null());
+    assert_eq!(store.resume_task_session("orch", key).unwrap_err().code, "session_not_ready");
+
+    // Releasing keeps it paused and makes it resumable through the normal protocol.
+    let released = store.release_task_session_hold("ui", key).unwrap();
+    assert!(released["held_by"].is_null() && released["paused_at"].is_string());
+    assert_eq!(store.next_ready_task(&board, None).unwrap()["dispatch_action"], "resume");
+    store.resume_task_session("orch", key).unwrap();
 }

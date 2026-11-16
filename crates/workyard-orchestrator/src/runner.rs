@@ -2,6 +2,21 @@
 //! Agents report their work through board commands, which stay durable events; the process
 //! handle only supplies the ephemeral "is it still running" signal.
 
+/// Where a worker runs. Mirrors the card's `workspace`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Workspace {
+    /// Its own git worktree and branch, so parallel workers never share a checkout.
+    Worktree,
+    /// Investigative work that changes no repository.
+    None,
+}
+
+impl Workspace {
+    pub fn from_card(card: &serde_json::Value) -> Self {
+        if card["workspace"] == "none" { Self::None } else { Self::Worktree }
+    }
+}
+
 /// Everything a runner needs to start or resume one worker.
 pub struct Launch {
     pub board_key: String,
@@ -13,6 +28,7 @@ pub struct Launch {
     pub prompt: String,
     /// Continue an existing runtime session instead of starting a new one.
     pub resume: bool,
+    pub workspace: Workspace,
 }
 
 /// A usage or rate limit the worker ran into, read from the runtime's structured output.
@@ -34,6 +50,18 @@ pub trait Worker: Send {
     fn poll(&mut self) -> WorkerState;
     /// Stop the worker. Called on shutdown; must be safe to call after it exited.
     fn stop(&mut self);
+    /// Hand a running worker a message. The runtime delivers it at its next opportunity (for
+    /// Claude Code, the next tool boundary or turn). Errors when the worker cannot take input.
+    fn send(&mut self, _message: &str) -> std::io::Result<()> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "worker takes no input"))
+    }
+    /// True once the worker has finished its work for now and gone quiet. The engine then
+    /// closes its input so the process can exit.
+    fn idle(&mut self) -> bool {
+        false
+    }
+    /// Close the worker's input. Safe to call repeatedly.
+    fn close_input(&mut self) {}
 }
 
 pub trait Runner: Send {

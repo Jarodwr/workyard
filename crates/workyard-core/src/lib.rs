@@ -670,6 +670,38 @@ impl Store {
         Ok(after)
     }
 
+    /// Choose where the card's worker runs: `worktree` (its own git worktree and branch, the
+    /// default) or `none` for investigative work that changes no repository.
+    pub fn set_card_workspace(
+        &self,
+        actor: &str,
+        card: &str,
+        workspace: &str,
+        expected: impl Into<Option<i64>>,
+    ) -> Result<Value> {
+        if !["worktree", "none"].contains(&workspace) {
+            return Err(Error::new("validation_error", "workspace must be worktree or none"));
+        }
+        let expected: Option<i64> = expected.into();
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = resolve_card(&tx, card)?;
+        let before = guard_card(&tx, &id, actor, expected)?;
+        let board_id = before["board_id"].as_str().unwrap();
+        check_board_active(&tx, board_id)?;
+        if before["workspace"] == workspace {
+            return Ok(before);
+        }
+        tx.execute(
+            "UPDATE cards SET workspace=?2,updated_at=?3,version=version+1 WHERE id=?1",
+            params![id, workspace, now()],
+        )?;
+        let after = card_row(&tx, &id)?;
+        record(&tx, actor, "card_workspace_changed", board_id, "card", &id, Some(&before), Some(&after), &[], "")?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
     pub fn claim_card(&self, actor: &str, card: &str, expected: i64) -> Result<Value> {
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1622,10 +1654,10 @@ impl Store {
 
 fn migrate(db: &mut Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 12 {
+    if version == 13 {
         return Ok(());
     }
-    if version > 12 {
+    if version > 13 {
         return Err(Error::new(
             "schema_too_new",
             "database was created by a newer Workyard version",
@@ -1760,6 +1792,15 @@ fn migrate(db: &mut Connection) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 12")?;
+        version = 12;
+    }
+    if version == 12 {
+        tx.execute_batch(include_str!("../migrations/013.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (13,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 13")?;
     }
     tx.commit()?;
     Ok(())
@@ -1935,15 +1976,16 @@ fn card_snapshot(db: &Connection, id: &str) -> Result<Card> {
         })?;
     let lane_kind = LaneKind::try_from(lane_kind.as_str())?;
     let open_question_count: i64 = db.query_row("SELECT COUNT(*) FROM dependencies d JOIN questions q ON q.id=d.to_question_id WHERE d.from_card_id=?1 AND q.status='open'", [&id], |r| r.get(0))?;
-    let (phase_id, cancelled_at, cancellation_reason, cancelled_by): (
+    let (phase_id, cancelled_at, cancellation_reason, cancelled_by, workspace): (
         String,
         Option<String>,
         Option<String>,
         Option<String>,
+        String,
     ) = db.query_row(
-        "SELECT phase_id,cancelled_at,cancellation_reason,cancelled_by FROM cards WHERE id=?1",
+        "SELECT phase_id,cancelled_at,cancellation_reason,cancelled_by,workspace FROM cards WHERE id=?1",
         [&id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     Ok(Card {
         id: CardId::try_from(id.as_str())?,
@@ -1965,6 +2007,7 @@ fn card_snapshot(db: &Connection, id: &str) -> Result<Card> {
         updated_at,
         version: Version::try_from(version)?,
         agent_type,
+        workspace,
         blocked,
         blockers,
         finish_blockers,

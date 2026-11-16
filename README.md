@@ -4,6 +4,7 @@ A local-first desktop kanban dashboard for work shared with AI agents. Implement
 
 - [Build specification](docs/SPEC.md)
 - [Implementation plan and acceptance checks](docs/IMPLEMENTATION.md)
+- [Operating Workyard (human workflow)](docs/WORKFLOW.md)
 - [Orchestrator event and notification contract](docs/ORCHESTRATOR.md)
 - [Project design notes](docs/PROJECTS.md)
 - [Board phases and scheduling](docs/adr/0001-board-phases-and-scheduling.md)

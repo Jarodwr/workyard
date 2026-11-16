@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use workyard_core::Store;
-use workyard_orchestrator::{LimitHit, Launch, Options, Orchestrator, Runner, Worker, WorkerState, hostname};
+use workyard_orchestrator::{LimitHit, Launch, Notifier, Options, Orchestrator, Runner, Worker, WorkerState, hostname};
 
 struct TempDir(PathBuf);
 impl Drop for TempDir {
@@ -24,17 +24,33 @@ struct FakeRunner {
     launches: Arc<Mutex<Vec<(String, bool, String)>>>,
     /// Reported (once) by the next worker to exit, as if it had run into a usage limit.
     limit_next: Arc<Mutex<Option<LimitHit>>>,
+    /// Everything `send` delivered to any worker, and how many workers were stopped.
+    messages: Arc<Mutex<Vec<String>>>,
+    stops: Arc<AtomicUsize>,
 }
-struct FakeWorker(Arc<AtomicBool>, Arc<Mutex<Option<LimitHit>>>);
+struct FakeWorker {
+    done: Arc<AtomicBool>,
+    limit: Arc<Mutex<Option<LimitHit>>>,
+    messages: Arc<Mutex<Vec<String>>>,
+    stops: Arc<AtomicUsize>,
+}
 impl Worker for FakeWorker {
+    fn send(&mut self, message: &str) -> std::io::Result<()> {
+        self.messages.lock().unwrap().push(message.to_owned());
+        Ok(())
+    }
     fn poll(&mut self) -> WorkerState {
-        if self.0.load(Ordering::SeqCst) {
-            WorkerState::Exited { success: true, limit: self.1.lock().unwrap().take() }
+        if self.done.load(Ordering::SeqCst) {
+            WorkerState::Exited { success: true, limit: self.limit.lock().unwrap().take() }
         } else {
             WorkerState::Running
         }
     }
-    fn stop(&mut self) {}
+    fn stop(&mut self) {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        // Let the fake agent's thread end, as a killed process would.
+        self.done.store(true, Ordering::SeqCst);
+    }
 }
 impl Runner for FakeRunner {
     fn name(&self) -> &str {
@@ -59,13 +75,19 @@ impl Runner for FakeRunner {
             session_id: launch.session_id.clone(),
             prompt: launch.prompt.clone(),
             resume: launch.resume,
+            workspace: launch.workspace,
         };
         std::thread::spawn(move || {
             behavior(&launch, &store);
             running.fetch_sub(1, Ordering::SeqCst);
             flag.store(true, Ordering::SeqCst);
         });
-        Ok(Box::new(FakeWorker(done, Arc::clone(&self.limit_next))))
+        Ok(Box::new(FakeWorker {
+            done,
+            limit: Arc::clone(&self.limit_next),
+            messages: Arc::clone(&self.messages),
+            stops: Arc::clone(&self.stops),
+        }))
     }
 }
 
@@ -79,6 +101,16 @@ struct Harness {
     max_running: Arc<AtomicUsize>,
     launches: Arc<Mutex<Vec<(String, bool, String)>>>,
     limit_next: Arc<Mutex<Option<LimitHit>>>,
+    messages: Arc<Mutex<Vec<String>>>,
+    stops: Arc<AtomicUsize>,
+    notices: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+struct Recorder(Arc<Mutex<Vec<(String, String)>>>);
+impl Notifier for Recorder {
+    fn notify(&self, title: &str, body: &str) {
+        self.0.lock().unwrap().push((title.to_owned(), body.to_owned()));
+    }
 }
 
 impl Harness {
@@ -101,6 +133,9 @@ impl Harness {
             max_running: Arc::new(AtomicUsize::new(0)),
             launches: Arc::new(Mutex::new(Vec::new())),
             limit_next: Arc::new(Mutex::new(None)),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            stops: Arc::new(AtomicUsize::new(0)),
+            notices: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -142,11 +177,16 @@ impl Harness {
             max_running: Arc::clone(&self.max_running),
             launches: Arc::clone(&self.launches),
             limit_next: Arc::clone(&self.limit_next),
+            messages: Arc::clone(&self.messages),
+            stops: Arc::clone(&self.stops),
         };
+        let notices = Arc::clone(&self.notices);
         let (db, board, stop) = (self.db.clone(), self.board.clone(), Arc::clone(&self.stop));
         std::thread::spawn(move || {
             let store = Store::new(db);
-            Orchestrator::new(&store, &board, Box::new(runner), options).run(&stop)
+            Orchestrator::new(&store, &board, Box::new(runner), options)
+                .with_notifier(Box::new(Recorder(notices)))
+                .run(&stop)
         })
     }
 
@@ -401,4 +441,124 @@ fn repeated_instant_failures_stop_dispatch_instead_of_walking_the_backlog() {
     assert_eq!(h.launches.lock().unwrap().len(), 3, "kept launching after the guard tripped");
     assert!(!h.event_types().contains(&"task_session_detached".to_owned()));
     h.finish(handle);
+}
+
+fn wait_until(what: &str, condition: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+fn a_human_note_reaches_the_running_worker_but_its_own_notes_do_not() {
+    let h = Harness::new();
+    let key = h.card("Live");
+    let messages = Arc::clone(&h.messages);
+    let handle = h.start(1, 3, move |launch, store| {
+        // The worker annotating its own card is not a message to itself.
+        store.add_card_note(&launch.actor, &launch.card_key, "working on it").unwrap();
+        wait_until("a note to arrive", || !messages.lock().unwrap().is_empty());
+        finish_card(launch, store);
+    });
+    h.wait("worker launched", |_| !h.launches.lock().unwrap().is_empty());
+    h.store.add_card_note("human", &key, "please use SQLite").unwrap();
+    h.wait("card done", |s| h.done_count(s) == 1);
+    h.finish(handle);
+    let messages = h.messages.lock().unwrap();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("please use SQLite") && messages[0].contains("human"), "{messages:?}");
+}
+
+#[test]
+fn force_releasing_a_card_stops_its_worker_and_it_is_not_restarted() {
+    let h = Harness::new();
+    let key = h.card("Obsolete");
+    let stops = Arc::clone(&h.stops);
+    let handle = h.start(1, 3, move |_, _| wait_until("stop", || stops.load(Ordering::SeqCst) > 0));
+    h.wait("worker launched", |_| !h.launches.lock().unwrap().is_empty());
+    // Only a card's owner can cancel it (ADR 0002), so taking work away from a running worker
+    // means force-releasing it, then replanning or cancelling it.
+    let version = h.store.view_card(&key).unwrap()["version"].as_i64().unwrap();
+    h.store.release_card("human", &key, version, Some("obsolete")).unwrap();
+    wait_until("worker stopped", || h.stops.load(Ordering::SeqCst) == 1);
+    std::thread::sleep(Duration::from_millis(300));
+    h.finish(handle);
+    assert_eq!(h.stops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_held_session_stops_its_worker_and_resumes_only_after_release() {
+    let h = Harness::new();
+    let key = h.card("Takeover");
+    let stops = Arc::clone(&h.stops);
+    let handle = h.start(1, 3, move |launch, store| {
+        if launch.resume {
+            finish_card(launch, store);
+        } else {
+            wait_until("stop", || stops.load(Ordering::SeqCst) > 0);
+        }
+    });
+    h.wait("worker launched", |_| !h.launches.lock().unwrap().is_empty());
+    h.store.hold_task_session("ui", &key, "jarod").unwrap();
+    wait_until("worker stopped", || h.stops.load(Ordering::SeqCst) == 1);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(h.launches.lock().unwrap().len(), 1, "resumed while a human held the session");
+    h.store.release_task_session_hold("ui", &key).unwrap();
+    h.wait("card done after release", |s| h.done_count(s) == 1);
+    h.finish(handle);
+    let launches = h.launches.lock().unwrap();
+    assert_eq!(launches.len(), 2);
+    assert!(launches[1].1, "released session is resumed, not restarted");
+}
+
+#[test]
+fn humans_are_notified_once_per_event_and_not_for_history() {
+    let h = Harness::new();
+    let ask = |title: &str| {
+        h.store
+            .raise_question("agent:x", &h.board, "business", title, "", &["Yes".to_owned(), "No".to_owned()], "Yes", "Simplest.", &[])
+            .unwrap();
+    };
+    ask("Old question"); // raised before the orchestrator ever ran: history, not news
+    let handle = h.start(1, 3, |_, _| {});
+    h.wait("lease taken", |s| s.orchestrator_status(&h.board).unwrap()["holder"].is_string());
+    ask("Fresh question");
+    wait_until("notification", || h.notices.lock().unwrap().iter().any(|(t, _)| t.contains("question")));
+    h.finish(handle);
+
+    // Raised while no orchestrator runs: delivered after restart, and only once.
+    ask("Raised while away");
+    h.stop.store(false, Ordering::SeqCst);
+    let handle = h.start(1, 3, |_, _| {});
+    wait_until("catch-up notification", || {
+        h.notices.lock().unwrap().iter().any(|(_, body)| body.contains("Raised while away"))
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    h.finish(handle);
+    let bodies: Vec<String> = h.notices.lock().unwrap().iter().map(|(_, b)| b.clone()).collect();
+    assert!(!bodies.iter().any(|b| b.contains("Old question")), "{bodies:?}");
+    assert_eq!(bodies.iter().filter(|b| b.contains("Fresh question")).count(), 1, "{bodies:?}");
+    assert_eq!(bodies.iter().filter(|b| b.contains("Raised while away")).count(), 1, "{bodies:?}");
+}
+
+#[test]
+fn workers_are_told_whether_they_get_a_worktree() {
+    let h = Harness::new();
+    let code = h.card("Code");
+    let research = h.card("Research");
+    let version = h.store.view_card(&research).unwrap()["version"].as_i64().unwrap();
+    h.store.set_card_workspace("human", &research, "none", version).unwrap();
+    let handle = h.start(2, 3, finish_card);
+    h.wait("both done", |s| h.done_count(s) == 2);
+    h.finish(handle);
+    let launches = h.launches.lock().unwrap();
+    let prompt = |key: &str| launches.iter().find(|l| l.0 == key).unwrap().2.clone();
+    assert!(prompt(&code).contains("own git worktree"), "{}", prompt(&code));
+    assert!(prompt(&research).contains("investigative"), "{}", prompt(&research));
+    assert!(!prompt(&research).contains("own git worktree"));
 }

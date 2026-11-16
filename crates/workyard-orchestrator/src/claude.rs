@@ -1,26 +1,36 @@
 //! Claude Code backend: `claude -p` runs headless on the user's existing login, so no API key
 //! is needed. A new worker uses `--session-id`; a resumed one uses `--resume`.
 //!
-//! Workers run with `--output-format stream-json --verbose`. Every line is appended to the
-//! worker's log, and each is read as JSON so a usage limit is recognised from structured
-//! fields (`rate_limit_event`, `result.api_error_status`), never from message text.
+//! Workers run with `--input-format stream-json --output-format stream-json --verbose`.
+//!
+//! Output: every line is appended to the worker's log and read as JSON, so a usage limit is
+//! recognised from structured fields (`rate_limit_event`, `result.api_error_status`), never
+//! from message text.
+//!
+//! Input: the first prompt and any later message are JSON user messages on stdin. Claude Code
+//! picks a message up at the next tool boundary of a running turn (or as the next turn), which
+//! is how a human's note reaches a worker without restarting it. The process stays alive after
+//! a turn until stdin closes, so the engine closes it once the worker is idle.
+//!
+//! Workspace: a card that needs a worktree runs with `--worktree <card-key>`, which creates
+//! `.claude/worktrees/<key>` on its own branch and reuses it when the session is resumed.
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState};
+use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState, Workspace};
 
 pub struct ClaudeRunner {
     pub bin: String,
-    /// Extra arguments, for example permission settings and allowed tools. Do not pass
-    /// `--output-format`: the runner needs `stream-json`.
+    /// Extra arguments, for example permission settings and allowed tools. Do not pass the
+    /// input or output format, or `--worktree`: the runner owns them.
     pub args: Vec<String>,
     pub db: PathBuf,
     pub cwd: Option<PathBuf>,
@@ -66,8 +76,19 @@ fn merge(slot: &mut Option<LimitHit>, hit: LimitHit) {
     }
 }
 
+/// How long after a `result` with nothing following it a worker counts as idle. A queued
+/// message starts its next turn at once, so any later event resets the clock.
+const IDLE_AFTER: Duration = Duration::from_millis(1500);
+
+struct Activity {
+    last_event: Instant,
+    last_was_result: bool,
+}
+
 struct ChildWorker {
     child: Child,
+    stdin: Option<ChildStdin>,
+    activity: Arc<Mutex<Activity>>,
     reader_done: Arc<AtomicBool>,
     limit: Arc<Mutex<Option<LimitHit>>>,
     exited_at: Option<Instant>,
@@ -102,9 +123,42 @@ impl Worker for ChildWorker {
     }
 
     fn stop(&mut self) {
+        self.stdin = None;
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    fn send(&mut self, message: &str) -> std::io::Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "input closed"))?;
+        write_user_message(stdin, message)?;
+        if let Ok(mut activity) = self.activity.lock() {
+            activity.last_was_result = false;
+            activity.last_event = Instant::now();
+        }
+        Ok(())
+    }
+
+    fn idle(&mut self) -> bool {
+        self.activity
+            .lock()
+            .is_ok_and(|a| a.last_was_result && a.last_event.elapsed() >= IDLE_AFTER)
+    }
+
+    fn close_input(&mut self) {
+        self.stdin = None;
+    }
+}
+
+fn write_user_message(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()> {
+    let message = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+    });
+    writeln!(stdin, "{message}")?;
+    stdin.flush()
 }
 
 impl Runner for ClaudeRunner {
@@ -120,16 +174,23 @@ impl Runner for ClaudeRunner {
             &launch.session_id[..launch.session_id.len().min(8)]
         )))?;
         let mut command = Command::new(&self.bin);
+        command.arg("-p").args([
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]);
+        if launch.workspace == Workspace::Worktree {
+            command.arg("--worktree").arg(launch.card_key.to_lowercase());
+        }
         command
-            .arg("-p")
-            .arg(&launch.prompt)
-            .args(["--output-format", "stream-json", "--verbose"])
             .arg(if launch.resume { "--resume" } else { "--session-id" })
             .arg(&launch.session_id)
             .args(&self.args)
             .env("WORKYARD_ACTOR", &launch.actor)
             .env("WORKYARD_DB", &self.db)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log.try_clone()?);
         // The worker must find the same `workyard` binary the orchestrator is running from.
@@ -147,14 +208,25 @@ impl Runner for ClaudeRunner {
         }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout is piped");
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        write_user_message(&mut stdin, &launch.prompt)?;
         let limit = Arc::new(Mutex::new(None));
         let reader_done = Arc::new(AtomicBool::new(false));
+        let activity = Arc::new(Mutex::new(Activity {
+            last_event: Instant::now(),
+            last_was_result: false,
+        }));
         {
-            let (limit, done) = (Arc::clone(&limit), Arc::clone(&reader_done));
+            let (limit, done, activity) = (Arc::clone(&limit), Arc::clone(&reader_done), Arc::clone(&activity));
             std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     let _ = writeln!(log, "{line}");
-                    if let Some(hit) = serde_json::from_str::<Value>(&line).ok().as_ref().and_then(limit_signal) {
+                    let parsed = serde_json::from_str::<Value>(&line).ok();
+                    if let Ok(mut a) = activity.lock() {
+                        a.last_event = Instant::now();
+                        a.last_was_result = parsed.as_ref().is_some_and(|v| v["type"] == "result");
+                    }
+                    if let Some(hit) = parsed.as_ref().and_then(limit_signal) {
                         if let Ok(mut slot) = limit.lock() {
                             merge(&mut slot, hit);
                         }
@@ -165,6 +237,8 @@ impl Runner for ClaudeRunner {
         }
         Ok(Box::new(ChildWorker {
             child,
+            stdin: Some(stdin),
+            activity,
             reader_done,
             limit,
             exited_at: None,

@@ -26,6 +26,7 @@ export type Card = {
   review_gates?: { change_id: string; working_branch: string; commit_oid: string; approved: boolean; reviewer: string | null }[];
   can_finish?: boolean;
   open_question_count: number;
+  workspace?: "worktree" | "none";
   stale?: boolean;
   last_activity_at?: string;
 };
@@ -49,7 +50,7 @@ export type Dependency = { id: string; from_card_id: string; to_card_id: string 
 export type CardChange = { id: string; version: number; repository_id: string; working_branch: string; target_branch: string; commit_oid: string; review_required: boolean; approved_commit_oid: string | null; reviewer: string | null };
 export type Orchestrator = { board_key: string; desired_state: "running" | "paused" | "draining"; pool_size: number; connected: boolean; holder: string | null; epoch: number; heartbeat_at: string | null; backing_off: boolean; backoff_until: string | null; backoff_reason: string };
 export type CardNote = { id: string; card_id: string; actor: string; body: string; created_at: string };
-export type TaskSession = { id: string; card_id: string; owner_actor: string; runner: string; external_session_id: string; attached_at: string; paused_at: string | null; waiting_question_id: string | null; waiting_question_key: string | null; last_delivered_event_id: number; detached_at: string | null };
+export type TaskSession = { id: string; card_id: string; owner_actor: string; runner: string; external_session_id: string; attached_at: string; paused_at: string | null; waiting_question_id: string | null; waiting_question_key: string | null; last_delivered_event_id: number; detached_at: string | null; held_by?: string | null };
 export type CardDetail = Card & { dependencies: Dependency[]; changes: CardChange[]; notes: CardNote[]; session: TaskSession | null; events: { id: number; type: string; actor: string; ts: string }[] };
 
 export const api = {
@@ -65,6 +66,8 @@ export const api = {
   answerQuestion: (question: Question, answer: string, note: string) => invoke<Question>("answer_question", { question: question.key, answer, note, expectedVersion: question.version }),
   assignQuestionStakeholder: (question: Question, stakeholder: string) => invoke<Question>("assign_question_stakeholder", { question: question.key, stakeholder, expectedVersion: question.version }),
   unassignQuestionStakeholder: (question: Question) => invoke<Question>("unassign_question_stakeholder", { question: question.key, expectedVersion: question.version }),
+  openInTerminal: (card: string) => invoke<TaskSession>("open_in_terminal", { card }),
+  releaseSessionHold: (card: string) => invoke<TaskSession>("release_session_hold", { card }),
   approveChange: (change: CardChange) => invoke<CardChange>("approve_change", { change: change.id, expectedVersion: change.version }),
   orchestratorStatus: (board: string) => invoke<Orchestrator>("orchestrator_status", { board }),
   setOrchestratorState: (board: string, state: Orchestrator["desired_state"]) => invoke<Orchestrator>("set_orchestrator_state", { board, state }),
@@ -121,6 +124,8 @@ function demoEvent(type: string, entityId: string) {
   demoEvents.push({ id: demoEvents.length + 1, type, board_id: demoBoard.id, entity_type: "card", entity_id: entityId, effects: [] });
 }
 const demoApi = {
+  openInTerminal: async (_card: string): Promise<TaskSession> => { throw new Error("Opening a terminal needs the desktop app"); },
+  releaseSessionHold: async (_card: string): Promise<TaskSession> => { throw new Error("Releasing a hold needs the desktop app"); },
   approveChange: async (change: CardChange): Promise<CardChange> => ({ ...clone(change), approved_commit_oid: change.commit_oid, reviewer: "demo", version: change.version + 1 }),
   orchestratorStatus: async (board: string): Promise<Orchestrator> => ({ ...clone(demoOrchestrator), board_key: board }),
   setOrchestratorState: async (board: string, state: Orchestrator["desired_state"]): Promise<Orchestrator> => { demoOrchestrator = { ...demoOrchestrator, desired_state: state }; demoEvent("orchestrator_state_changed", board); return { ...clone(demoOrchestrator), board_key: board }; },

@@ -19,7 +19,7 @@ pub(crate) fn active_session(db: &Connection, card_id: &str) -> Result<Option<Va
 
 fn session_row(db: &Connection, id: &str) -> Result<Value> {
     Ok(db.query_row(
-        "SELECT s.id,s.card_id,s.owner_actor,s.runner,s.external_session_id,s.attached_at,s.paused_at,s.waiting_question_id,q.key,s.last_delivered_event_id,s.detached_at FROM task_sessions s LEFT JOIN questions q ON q.id=s.waiting_question_id WHERE s.id=?1",
+        "SELECT s.id,s.card_id,s.owner_actor,s.runner,s.external_session_id,s.attached_at,s.paused_at,s.waiting_question_id,q.key,s.last_delivered_event_id,s.detached_at,s.held_by FROM task_sessions s LEFT JOIN questions q ON q.id=s.waiting_question_id WHERE s.id=?1",
         [id],
         |row| Ok(json!({
             "id":row.get::<_,String>(0)?, "card_id":row.get::<_,String>(1)?,
@@ -28,6 +28,7 @@ fn session_row(db: &Connection, id: &str) -> Result<Value> {
             "paused_at":row.get::<_,Option<String>>(6)?, "waiting_question_id":row.get::<_,Option<String>>(7)?,
             "waiting_question_key":row.get::<_,Option<String>>(8)?,
             "last_delivered_event_id":row.get::<_,i64>(9)?, "detached_at":row.get::<_,Option<String>>(10)?,
+            "held_by":row.get::<_,Option<String>>(11)?,
         })),
     )?)
 }
@@ -69,6 +70,7 @@ fn require_current_owner(card: &Value, session: &Value) -> Result<()> {
 
 pub(crate) fn resume_eligible(db: &Connection, card: &Value, session: &Value) -> Result<bool> {
     if session["paused_at"].is_null()
+        || session["held_by"].is_string()
         || session["detached_at"].is_string()
         || card["owner_actor"] != session["owner_actor"]
     {
@@ -199,6 +201,78 @@ impl Store {
             Some(&before),
             Some(&after),
             &[json!({"type":"task_session_paused","card_id":card_id})],
+            "",
+        )?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
+    /// A human takes the session over, for example in a terminal. The session is paused and not
+    /// offered for resume until `release_task_session_hold`; the orchestrator stops any worker
+    /// it has running for the card when it sees the event.
+    pub fn hold_task_session(&self, actor: &str, card: &str, holder: &str) -> Result<Value> {
+        require_nonblank("holder", holder)?;
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let card_id = resolve_card(&tx, card)?;
+        let card = claimed_active_card(&tx, &card_id)?;
+        let before = active_session(&tx, &card_id)?
+            .ok_or_else(|| Error::new("session_not_found", "task has no attached session"))?;
+        require_current_owner(&card, &before)?;
+        if let Some(existing) = before["held_by"].as_str() {
+            if existing != holder.trim() {
+                return Err(Error::new("session_held", format!("session is already held by {existing}")));
+            }
+            return Ok(before);
+        }
+        tx.execute(
+            "UPDATE task_sessions SET held_by=?2,paused_at=COALESCE(paused_at,?3) WHERE id=?1",
+            params![before["id"].as_str().unwrap(), holder.trim(), now()],
+        )?;
+        let after = session_row(&tx, before["id"].as_str().unwrap())?;
+        record(
+            &tx,
+            actor,
+            "task_session_held",
+            card["board_id"].as_str().unwrap(),
+            "task_session",
+            before["id"].as_str().unwrap(),
+            Some(&before),
+            Some(&after),
+            &[json!({"type":"task_session_held","card_id":card_id})],
+            "",
+        )?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
+    /// Give the session back. It stays paused; the orchestrator resumes it through the normal
+    /// briefing protocol, so it will see everything that happened while it was held.
+    pub fn release_task_session_hold(&self, actor: &str, card: &str) -> Result<Value> {
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let card_id = resolve_card(&tx, card)?;
+        let card = card_row(&tx, &card_id)?;
+        let before = active_session(&tx, &card_id)?
+            .ok_or_else(|| Error::new("session_not_found", "task has no attached session"))?;
+        if before["held_by"].is_null() {
+            return Ok(before);
+        }
+        tx.execute(
+            "UPDATE task_sessions SET held_by=NULL WHERE id=?1",
+            [before["id"].as_str().unwrap()],
+        )?;
+        let after = session_row(&tx, before["id"].as_str().unwrap())?;
+        record(
+            &tx,
+            actor,
+            "task_session_hold_released",
+            card["board_id"].as_str().unwrap(),
+            "task_session",
+            before["id"].as_str().unwrap(),
+            Some(&before),
+            Some(&after),
+            &[json!({"type":"task_session_hold_released","card_id":card_id})],
             "",
         )?;
         self.commit(tx)?;

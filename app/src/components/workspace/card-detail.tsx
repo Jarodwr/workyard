@@ -24,6 +24,8 @@ type Props = {
   onClose: () => void;
   onAddNote: (card: Card, body: string) => Promise<boolean>;
   onApproveChange: (change: CardChange) => Promise<boolean>;
+  onOpenInTerminal: (card: Card) => Promise<boolean>;
+  onReleaseHold: (card: Card) => Promise<boolean>;
 };
 
 export function CardDetail({
@@ -34,6 +36,8 @@ export function CardDetail({
   onClose,
   onAddNote,
   onApproveChange,
+  onOpenInTerminal,
+  onReleaseHold,
 }: Props) {
   const reduced = useReducedMotion();
   const [note, setNote] = useState("");
@@ -127,8 +131,14 @@ export function CardDetail({
               {detail?.session && (
                 <UiCard className="mt-3 p-3 shadow-none">
                   <p className="text-[11px] text-muted-foreground">Agent session</p>
-                  <p className="mt-1 text-xs font-medium">{detail.session.runner} · {detail.session.paused_at ? "Paused" : "Attached"}</p>
+                  <p className="mt-1 text-xs font-medium">{detail.session.runner} · {detail.session.held_by ? `Held by ${detail.session.held_by}` : detail.session.paused_at ? "Paused" : "Attached"}</p>
                   {detail.session.waiting_question_key && <p className="mt-1 text-xs text-muted-foreground">Waiting for {detail.session.waiting_question_key}</p>}
+                  <p className="mt-1 text-xs text-muted-foreground">{card.workspace === "none" ? "No worktree (investigation)" : "Own git worktree"}</p>
+                  {detail.session.held_by ? (
+                    <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" onClick={() => void onReleaseHold(card)}>Release hold</Button>
+                  ) : detail.session.runner === "claude" ? (
+                    <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" title="Stops the running worker and opens this session in your terminal" onClick={() => void onOpenInTerminal(card)}>Open in terminal</Button>
+                  ) : null}
                 </UiCard>
               )}
               {card.blocked && (

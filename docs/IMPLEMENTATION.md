@@ -2,6 +2,8 @@
 
 The build order puts the highest-risk behavior first: an external move must look continuous while UI state survives. Each milestone should leave a runnable, reviewable slice.
 
+See [WORKFLOW.md](WORKFLOW.md) for how the finished pieces are operated.
+
 Current progress: workspace, migrations, core command surface, CLI, Tauri bridge, and a React board prototype are in source. Core/CLI tests, a Tauri binary build, and the frontend bundle pass. Ordered board phases, opportunistic next-phase scheduling, cancellation, and a phase-grouped dependency graph are implemented. Human writes are limited to answers and card notes. packaging also remains open. The external move animation check has been accepted.
 
 Review workflow follow-up: the agreed agent-led cycle is recorded in `SPEC.md` and `ORCHESTRATOR.md`. New boards now have three lanes; the showcase Review lane was emptied through CLI moves and archived. Other existing boards may still have legacy Review lanes and need owner-authorized moves before archival. Wire the external orchestrator to deliver each linked question answer and explanation to the current ticket owner. Ticket moves and resubmissions remain agent actions.

@@ -90,6 +90,7 @@ The Rust core exposes typed `Card` and `Question` snapshots, distinct board/card
 | `card_changes` | Added in migration 7. Linked repository, working and target branch, `commit_oid`, `review_required`, `approved_commit_oid`, `reviewer`, `version`. A new commit clears approval |
 | `phases` | Added in migrations 8 and 9. Ordered per board with a unique name, description, `version`, and `closed_at`; `boards.current_phase_id` points at the current one; `cards` and `questions` carry `phase_id`. See ADR 0001 |
 | `orchestrator_sessions` | Added in migrations 11 and 12. One row per board: `desired_state` (`running`, `paused`, `draining`), event `cursor`, `pool_size`, the lease (`holder`, `host`, `pid`, `epoch`, `heartbeat_at`, `lease_expires_at`), and `backoff_until`/`backoff_reason`. See [ORCHESTRATOR.md](ORCHESTRATOR.md) |
+| `cards.workspace`, `task_sessions.held_by` | Added in migration 13. `workspace` is `worktree` (default) or `none`; `held_by` names a human who has taken a session over |
 | `dependencies.scope` | Added in migration 7: `start` (default) or `finish` |
 | `cards.cancelled_at`, `cancellation_reason`, `cancelled_by` | Added in migration 8. A terminal marker, not a lane. See ADR 0002 |
 
@@ -243,6 +244,7 @@ workyard task ask <B-1> "Title" --kind K --option A --option B --recommend A --w
 workyard task question-options <Q-3> ...
 workyard task link-change <C-1> <repo> <branch> [--review-required]
 workyard task update-change <change> <commit>
+workyard task workspace <C-1> worktree|none      # also: task add-card --workspace none
 workyard task require-review <change> --required true|false
 
 # plan: project and board structure
@@ -261,6 +263,7 @@ workyard orch acquire <B-1> [--holder H] [--pid N] [--lease S] [--pool N]   # pr
 workyard --actor orch:<B-1>#<epoch> orch heartbeat|release|cursor|dispatch <B-1> ...
 workyard events --since N --follow               # one JSON line per event, wakes on commit
 workyard orch session attach|pause|resume|ack|detach|briefing <C-1> ...
+workyard orch session hold <C-1> [--by NAME] | release-hold <C-1>   # human takeover
 workyard orch transfer <C-1> --to-actor A
 workyard orch force-release <C-1> --reason "..."
 
@@ -272,7 +275,7 @@ Review approval has no CLI command. A human approves the current commit of a lin
 
 There is no MCP server. Agents run locally with a shell, so they call the CLI directly. The Claude Code plugin in `plugin/` provides a `workyard` skill describing the worker loop and a `SessionStart` hook that sets `WORKYARD_ACTOR` when the orchestrator has not. Actor strings must stay stable for a session, since ownership is checked against them. Do not expose raw SQL or arbitrary file access.
 
-The Tauri backend calls `workyard-core` directly through thin `#[tauri::command]` wrappers with actor `ui`. It exposes reads and a small set of human writes: `answer_question`, `add_card_note`, stakeholder assignment, `approve_change` (the only way to approve a review gate), and `set_orchestrator_state` (pause, resume, drain). A background thread emits a `workyard-tick` event whenever the core touches `<db>.tick`, and every two seconds regardless. It opens its own connection and obeys the same command and ownership checks. Do not use a generic webview SQL plugin.
+The Tauri backend calls `workyard-core` directly through thin `#[tauri::command]` wrappers with actor `ui`. It exposes reads and a small set of human writes: `answer_question`, `add_card_note`, stakeholder assignment, `approve_change` (the only way to approve a review gate), `set_orchestrator_state` (pause, resume, drain), and `open_in_terminal` / `release_session_hold` (take a Claude session over in the default terminal). A background thread emits a `workyard-tick` event whenever the core touches `<db>.tick`, and every two seconds regardless. It opens its own connection and obeys the same command and ownership checks. Do not use a generic webview SQL plugin.
 
 ## 8. UI and animation
 
