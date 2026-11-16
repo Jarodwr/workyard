@@ -159,10 +159,10 @@ export function DependencyView({
               {layout.nodes.length === 0 && <p className="absolute left-6 top-24 text-xs text-muted-foreground">No cards or open questions in this phase yet.</p>}
               <svg className="pointer-events-none absolute inset-0" width={layout.width} height={layout.height} aria-hidden="true">
                 <defs>
-                  <marker id="arrow-sequence" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="var(--primary)" /></marker>
-                  <marker id="arrow-open" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="#d89539" /></marker>
-                  <marker id="arrow-resolved" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="var(--muted-foreground)" /></marker>
-                  <marker id="arrow-finish" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="#6366f1" /></marker>
+                  <marker id="arrow-sequence" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--primary)" /></marker>
+                  <marker id="arrow-open" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#d89539" /></marker>
+                  <marker id="arrow-resolved" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--muted-foreground)" /></marker>
+                  <marker id="arrow-finish" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#6366f1" /></marker>
                 </defs>
                 {layout.edges.map((edge) => {
                   const from = nodeById.get(edge.source);

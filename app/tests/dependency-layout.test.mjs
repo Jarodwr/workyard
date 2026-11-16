@@ -111,3 +111,15 @@ test("a wire that skips a column avoids cards, and avoids the header band when i
   const longest = routes.get("C-4-C-7").points; // crosses into the next phase past C-6
   assert.ok(longest.length >= 4);
 });
+
+test("every wire ends with a straight run into its card, long enough to carry the arrowhead", () => {
+  const { layout, routes } = todoBoard();
+  for (const link of layout.edges) {
+    const points = routes.get(link.id).points;
+    const [[xa, ya], [xb, yb]] = segments(points).at(-1);
+    assert.equal(ya, yb, `${link.id} does not arrive horizontally`);
+    assert.ok(xb - xa >= 24, `${link.id} arrives over only ${xb - xa}px`);
+    const target = layout.nodes.find((card) => card.id === link.target);
+    assert.ok(xb < target.x && target.x - xb <= 4, `${link.id} does not end at its card`);
+  }
+});

@@ -270,6 +270,8 @@ export type RoutedEdge = { d: string; points: Point[] };
 const CLEARANCE = 6; // space kept between a wire and a card
 const TRACK = 5; // distance between parallel wires
 const GUTTER_INSET = 14; // first track's distance from a card's side
+const ARRIVAL_RUN = 30; // straight run into a card, long enough for the arrowhead to sit on it
+const ARROW_GAP = 3; // where a wire ends, short of the card's edge
 const TOP_BAND_PENALTY = 60; // corridors above the first row sit under the sticky phase header
 
 /** Does a horizontal run at `y` between `xa` and `xb` touch a card other than `skip`? */
@@ -342,12 +344,12 @@ export function routeDependencyEdges(nodes: LayoutNode[], edges: GraphEdgeInput[
     const x2 = to.x;
     const y2 = to.y + GRAPH_NODE_HEIGHT / 2;
     // The straight run at the source's height, out to the gutter beside the dependent.
-    const directClear = !runHitsCard(nodes, x1, x2 - GUTTER_INSET, y1, from.id);
+    const directClear = !runHitsCard(nodes, x1, x2 - ARRIVAL_RUN, y1, from.id);
     let corridor: number | null = null;
     if (!directClear) {
       let best = Infinity;
       for (const y of corridorYs) {
-        if (runHitsCard(nodes, x1 + GUTTER_INSET, x2 - GUTTER_INSET, y, "")) continue;
+        if (runHitsCard(nodes, x1 + GUTTER_INSET, x2 - ARRIVAL_RUN, y, "")) continue;
         const cost = Math.abs(y - y1) + Math.abs(y - y2) + (y < minTop - 8 ? TOP_BAND_PENALTY : 0);
         if (cost < best) { best = cost; corridor = y; }
       }
@@ -425,8 +427,8 @@ export function routeDependencyEdges(nodes: LayoutNode[], edges: GraphEdgeInput[
   for (const route of routes) {
     const used = keys.get(route)!;
     const yc = corridorY.get(route) ?? route.y1;
-    const xIn = route.x2 - GUTTER_INSET - (used.in ? trackOf.get(used.in)! * TRACK : 0);
-    const end: Point = [route.x2 - 8, route.y2];
+    const xIn = route.x2 - ARRIVAL_RUN - (used.in ? trackOf.get(used.in)! * TRACK : 0);
+    const end: Point = [route.x2 - ARROW_GAP, route.y2];
     let points: Point[];
     if (route.corridor === null) {
       points = [[route.x1, route.y1], [xIn, route.y1], [xIn, route.y2], end];
