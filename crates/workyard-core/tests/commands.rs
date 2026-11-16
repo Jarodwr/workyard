@@ -1996,7 +1996,7 @@ fn supervisor_limits_are_enforced_in_the_core() {
     store.add_card_note(&sup, key, "steer").unwrap();
     store.view_card(key).unwrap();
 
-    // Questions: only engineering with a recommendation, answered with exactly it.
+    // Questions are for humans: no answering or dropping, even with the recommended option.
     let opts = ["A".to_owned(), "B".to_owned()];
     let biz = store.raise_question("agent:one", &board, "business", "Biz?", "", &opts, "A", "r", &[]).unwrap();
     let eng = store.raise_question("agent:one", &board, "engineering", "Eng?", "", &opts, "A", "r", &[]).unwrap();
@@ -2004,10 +2004,81 @@ fn supervisor_limits_are_enforced_in_the_core() {
     assert_eq!(code(store.resolve_question(&sup, &k(&biz), "A", None, 1, false)), "forbidden_for_supervisor");
     assert_eq!(code(store.resolve_question(&sup, &k(&eng), "B", None, 1, false)), "forbidden_for_supervisor");
     assert_eq!(code(store.resolve_question(&sup, &k(&eng), "A", None, 1, true)), "forbidden_for_supervisor");
-    let done = store.resolve_question(&sup, &k(&eng), "A", None, 1, false).unwrap();
-    assert_eq!(done["status"], "answered");
+    assert_eq!(code(store.resolve_question(&sup, &k(&eng), "A", None, 1, false)), "forbidden_for_supervisor");
+    let err = store.resolve_question(&sup, &k(&eng), "A", None, 1, false).unwrap_err();
+    assert!(err.hint.unwrap().contains("human"));
+    assert_eq!(serde_json::to_value(store.read_question(&k(&eng)).unwrap()).unwrap()["status"], "open");
+
+    // Description, scope and dependency changes are refused too.
+    let other = store.create_card("cli", &board, "Other", "", "P2", None).unwrap();
+    assert_eq!(code(store.update_card(&sup, key, 1, None, Some("new scope"), None, None)), "forbidden_for_supervisor");
+    assert_eq!(code(store.set_card_workspace(&sup, key, "none", 1)), "forbidden_for_supervisor");
+    assert_eq!(code(store.add_dependency(&sup, key, other["key"].as_str().unwrap(), 1)), "forbidden_for_supervisor");
+    assert_eq!(code(store.remove_dependency(&sup, key, other["key"].as_str().unwrap(), 1)), "forbidden_for_supervisor");
+
+    // Holds, resume and reclaim stay allowed (see the reclaim tests).
     // A human is unaffected.
     store.resolve_question("ui", &k(&biz), "B", None, 1, false).unwrap();
+}
+
+fn in_progress_with_session(store: &Store, board: &str, title: &str) -> String {
+    let card = store.create_card("cli", board, title, "", "P2", None).unwrap();
+    let key = card["key"].as_str().unwrap().to_owned();
+    store.claim_card("agent:w", &key, 1).unwrap();
+    store.move_card("agent:w", &key, "In Progress", None, None::<i64>).unwrap();
+    store.attach_task_session("agent:w", &key, "claude", &format!("sess-{key}")).unwrap();
+    key
+}
+
+#[test]
+fn reclaim_returns_a_dead_sessions_card_to_the_backlog_for_humans_and_the_supervisor() {
+    let (_dir, store, board) = setup();
+    let sup = format!("agent:supervisor-{board}");
+    for (actor, title) in [("ui", "By human"), (sup.as_str(), "By supervisor")] {
+        let key = in_progress_with_session(&store, &board, title);
+        let backlog_lane = store.create_card("cli", &board, "Probe", "", "P2", None).unwrap()["lane_id"].clone();
+        // A paused session means the worker is gone (the orchestrator pauses the sessions of dead workers).
+        store.pause_task_session("agent:w", &key, None).unwrap();
+        let moved = store.reclaim_card(actor, &key, "worker died").unwrap();
+        assert_eq!(moved["lane_id"], backlog_lane, "{moved}");
+        assert!(moved["owner_actor"].is_null());
+        assert!(store.list_task_sessions(&board).unwrap().as_array().unwrap().iter().all(|s| s["card_key"] != key.as_str()));
+        let events = store.poll_events(0, 1000).unwrap()["events"].clone();
+        assert!(events.as_array().unwrap().iter().any(|e| e["type"] == "card_reclaimed" && e["actor"] == actor), "{events}");
+    }
+}
+
+#[test]
+fn reclaim_refuses_a_worker_that_is_running_and_recently_active() {
+    let (_dir, store, board) = setup();
+    let key = in_progress_with_session(&store, &board, "Busy");
+    let err = store.reclaim_card("ui", &key, "stuck?").unwrap_err();
+    assert_eq!(err.code, "worker_active");
+    let card = store.view_card(&key).unwrap();
+    assert_eq!(card["owner_actor"], "agent:w");
+    assert!(store.list_task_sessions(&board).unwrap().as_array().unwrap().iter().any(|s| s["card_key"] == key.as_str()));
+    // Unclaimed and unstarted cards have nothing to reclaim.
+    let idle = store.create_card("cli", &board, "Idle", "", "P2", None).unwrap();
+    assert_eq!(store.reclaim_card("ui", idle["key"].as_str().unwrap(), "x").unwrap_err().code, "validation_error");
+}
+
+#[test]
+fn reclaim_allows_a_running_session_that_has_gone_quiet_and_keeps_branch_and_worktree() {
+    let (dir, store, board) = setup();
+    let key = in_progress_with_session(&store, &board, "Quiet");
+    let db = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    let long_ago = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    db.execute("UPDATE task_sessions SET attached_at=?1", [&long_ago]).unwrap();
+    db.execute("UPDATE events SET ts=?1 WHERE entity_id IN (SELECT id FROM cards)", [&long_ago]).unwrap();
+    drop(db);
+    let before = store.view_card(&key).unwrap();
+    store.reclaim_card("ui", &key, "silent for 30 minutes").unwrap();
+    let after = store.view_card(&key).unwrap();
+    assert!(after["owner_actor"].is_null());
+    // Nothing about the card's workspace or description changed: only ownership and lane.
+    assert_eq!(after["title"], before["title"]);
+    assert_eq!(after["workspace"], before["workspace"]);
+    assert_eq!(after["description"], before["description"]);
 }
 
 /// Put the database back to schema 17, as an older binary leaves it: no version on the lease.

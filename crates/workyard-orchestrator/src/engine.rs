@@ -345,8 +345,9 @@ impl<'a> Orchestrator<'a> {
         *count += 1;
         let count = *count;
         self.tell_supervisor(format!(
-            "The worker on {key} {why} (failure {count} of {}). Its log is in the board's .logs directory.",
-            self.opts.max_failures
+            "The worker on {key} {why} (failure {count} of {}). {}.",
+            self.opts.max_failures,
+            Self::stuck_details(&*self.runner, key)
         ));
         if count >= self.opts.max_failures {
             self.failures.remove(key);
@@ -398,7 +399,7 @@ impl<'a> Orchestrator<'a> {
                         "Workyard: dispatch is waiting on the main checkout",
                         &format!("{problem}. Workers merge into it, so no new card starts until it is clean, on its branch and not mid-merge."),
                     );
-                    self.tell_supervisor(format!("Dispatch is paused: {problem}."));
+                    self.tell_supervisor(format!("Dispatch is paused: {problem}. Main checkout {}.", main.display()));
                     self.checkout_problem = Some(problem);
                 }
                 false
@@ -584,7 +585,10 @@ impl<'a> Orchestrator<'a> {
                 if self.denials_seen.insert(format!("{key}: {denial}")) {
                     self.notifier.notify("Workyard: a tool was refused", &format!("{key}: {denial}"));
                     if self.opts.supervisor {
-                        self.digest.borrow_mut().push(format!("A tool was refused for the worker on {key}: {denial}"));
+                        self.digest.borrow_mut().push(format!(
+                            "A tool was refused for the worker on {key}: {denial}. {}.",
+                            Self::stuck_details(&*self.runner, key)
+                        ));
                     }
                 }
                 updates.push((key.clone(), format!("blocked: {denial}"), true));
@@ -749,22 +753,24 @@ impl<'a> Orchestrator<'a> {
                     "Workyard: a question needs you",
                     &format!("{}: {}", after["key"].as_str().unwrap_or("?"), after["title"].as_str().unwrap_or("")),
                 );
-                self.tell_supervisor(format!(
-                    "Question {} ({}) raised: {} Options: {}. Recommended: {}.",
-                    after["key"].as_str().unwrap_or("?"),
-                    after["kind"].as_str().unwrap_or("?"),
-                    after["title"].as_str().unwrap_or(""),
-                    after["options"],
-                    after["recommended_option"].as_str().unwrap_or("none"),
-                ));
             }
             "card_reclaimed" => {
                 let key = self.card_key(entity).unwrap_or_default();
-                self.tell_supervisor(format!("{key} was handed back to the backlog after its worker kept failing."));
+                // A reclaim by someone else (a human or the supervisor) takes the card from a worker
+                // that may still be running; the orchestrator's own reclaim follows a dead one, and
+                // a fresh worker may already be on the card by the time the event arrives.
+                if !event["actor"].as_str().unwrap_or_default().starts_with("orch:") {
+                    self.stop_worker(actor, &key);
+                }
+                self.tell_supervisor(format!("{key} was handed back to the backlog. {}.", Self::stuck_details(&*self.runner, &key)));
             }
             "card_note_added" => {
                 let author = after["actor"].as_str().unwrap_or_default();
                 let Ok(card) = self.store.read_card(entity) else { return };
+                // The supervisor (or anyone) flags what needs a human; each note is one alert.
+                if let Some(problem) = after["body"].as_str().and_then(|body| body.trim().strip_prefix("NEEDS HUMAN:")) {
+                    self.notifier.notify("Workyard: a card needs you", &format!("{}: {}", card.key, problem.trim()));
+                }
                 // Notes by the worker itself or by the orchestrator are not messages to it.
                 if author.starts_with("orch:") || Some(author) == card.owner_actor.as_deref() {
                     return;
@@ -808,6 +814,21 @@ impl<'a> Orchestrator<'a> {
             }
             _ => {}
         }
+    }
+
+    /// What the supervisor needs to act on a card: its worker log, worktree, branch and the
+    /// main checkout. Paths the runner does not know are left out.
+    fn stuck_details(runner: &dyn Runner, key: &str) -> String {
+        let mut parts = vec![format!("Card {key}")];
+        if let Some(dir) = runner.log_dir() {
+            parts.push(format!("worker log {}", dir.join(format!("{key}-*.log")).display()));
+        }
+        if let Some(main) = runner.checkout() {
+            parts.push(format!("worktree {}", worktree_path(&main, key).display()));
+            parts.push(format!("branch {}", branch_for(key)));
+            parts.push(format!("main checkout {}", main.display()));
+        }
+        parts.join("; ")
     }
 
     /// Queue something for the supervisor agent; a no-op when none is configured.
@@ -862,7 +883,7 @@ impl<'a> Orchestrator<'a> {
         }
         let Some(live) = self.supervisor.as_mut() else { return };
         let lines: Vec<String> = std::mem::take(&mut *self.digest.borrow_mut());
-        let message = format!("Board {} events needing your judgement:\n- {}", self.board, lines.join("\n- "));
+        let message = format!("Board {} is stuck; act on each line per your playbook, or escalate:\n- {}", self.board, lines.join("\n- "));
         if live.worker.send(&message).is_ok() {
             self.digest_sent = Instant::now();
         } else {
@@ -1047,7 +1068,7 @@ If you must wait again, pause (`workyard orch session pause {key} --waiting-ques
     )
 }
 
-/// What the supervisor agent is told once at start. It is woken later by event digests.
+/// What the supervisor agent is told once at start. It is woken later by digests of stuck work.
 fn supervisor_prompt(board: &str, permissions: &str, rebase: bool) -> String {
     let integration = if rebase {
         "Workers on this board integrate by rebasing onto the target, so a note about a conflict should say to rebase, not merge."
@@ -1056,19 +1077,42 @@ fn supervisor_prompt(board: &str, permissions: &str, rebase: bool) -> String {
     };
     format!(
         "You are the supervisor agent for Workyard board {board}. A script runs the board (leases, worker processes, \
-limits, backoff); you do the thinking it cannot. You stay running. Messages arrive as lists of board events that \
-need judgement: a worker that kept exiting unfinished, a question, a refused tool, a card handed back to the backlog, a backoff. \
+limits, backoff). You exist to UNSTICK the workflow: repair and re-launch work with your own shell, git and the `workyard` CLI. \
+You never decide what the work should be. You are NOT a substitute for human intervention: when in doubt, escalate. \
+You stay running. Messages arrive as lines about stuck work, each with the card key, worker log, worktree, branch and main checkout. \
 Between messages do nothing and spend nothing.\n\
-Use only the `workyard` CLI (read with `--json`: `board {board}`, `card <key>`, `questions {board}`, `events`). You may:\n\
-- steer a worker with `workyard task note <card> \"...\"`: a note reaches a running worker at its next step. Say concretely how to get \
-around the problem (use Write/Edit instead of a heredoc, a different command, resolve the conflict, run the tests another way).\n\
-- answer an engineering question with `workyard admin answer` ONLY when its kind is engineering, it has a recommended option, and you \
-agree with it. Every other question (business, stakeholder, a choice that costs money or changes scope) is for the human: do nothing, \
-they are already notified.\n\
-- note on a card what you learned when a card keeps failing, so the human can read it.\n\
-You must NOT: approve changes or reviews, move cards between lanes, cancel or force-release cards, change code or files, run git, \
-start or stop processes, or answer for a human. If something needs one of those, leave a note on the card saying what and why. \
-Permissions for workers are `{permissions}`. {integration} Keep every action small and say in one line what you did and why.\n\
+\n\
+FOR EVERY STUCK CASE: (1) investigate first: the worker's log (`<db>.logs/<card>-*.log`, path in the message), `git status` and `git log` \
+in the worktree, `workyard --json card <card>`; (2) fix the cause; (3) verify the fix by re-running the failing command or the tests; \
+(4) then either `workyard orch reclaim <card> --reason \"...\"` (the worker is dead or stuck: the card returns to the backlog and a fresh \
+worker takes it, keeping its branch and worktree) or `workyard task note <card> \"...\"` to tell a live worker in one short line what \
+changed so it continues; (5) record what you did as a card note starting `Supervisor did:`.\n\
+\n\
+CASES:\n\
+- A worker that keeps exiting unfinished: read its log, fix the cause, reclaim.\n\
+- A stale lock (`.git/index.lock`, `.git/worktrees/*/locked`) or a stuck merge or rebase in a worktree: check no git process is running, then \
+abort (`git merge --abort`, `git rebase --abort`) or remove the stale lock.\n\
+- A dirty or off-branch main checkout blocking a fast-forward: move the changes aside safely (backup first, below), put the checkout back on its branch.\n\
+- A missing dependency or stale build directory: run the repository's worktree setup script or its install step, then re-run the failing command.\n\
+- A worker whose branch is tested and ready but whose integration keeps losing the race: merge the target into its branch in the worktree, \
+re-run the tests, then run the fast-forward yourself (`git -C <main checkout> merge --ff-only <branch>`); if main moved, repeat.\n\
+- A stale claim whose worker is gone: `workyard orch reclaim`.\n\
+- A tool refused in safe mode: do NOT widen permissions. Escalate (see NEEDS HUMAN).\n\
+- A backoff: wait; do nothing.\n\
+\n\
+SAFETY RULES. Before any destructive step make a backup: a branch `backup/<card>-<timestamp>` at HEAD and a `git stash` of uncommitted \
+work. Never discard commits or uncommitted work. Never force-push. Never rewrite history that is on the target branch. Touch the main \
+checkout only to abort a stuck merge or rebase, to move aside a blocking change with a backup, or to fast-forward a tested branch. \
+Resolve a merge conflict only when it is mechanical (lockfiles, generated files, formatting, import order, identical changes on both sides) \
+and re-run the tests afterwards.\n\
+\n\
+ESCALATE, DO NOT DECIDE. Anything that needs judgement is not yours: a conflict whose resolution changes behaviour, an unclear requirement, \
+a failing test whose fix is a design choice, anything the card's author would want to weigh in on. Leave a card note starting `NEEDS HUMAN:` \
+that states the problem and the options you can see (it raises one desktop notification), then take no further action on that card. \
+You may not answer or drop questions (they are for humans), approve changes, move cards between lanes, cancel, force-release a healthy \
+worker, transfer a card, or change a card's description, scope or dependencies; the core refuses these. You may read everything, add \
+notes, place and release holds, resume a paused session and `orch reclaim`. Permissions for workers are `{permissions}`. {integration} \
+Say in one line what you did and why.\n\
 Reply 'ready' now."
     )
 }
@@ -1088,6 +1132,25 @@ mod integration_prompt_tests {
         let rebase = integration_steps("C-1", &ctx(true));
         assert!(rebase.contains("git rebase main") && !rebase.contains("git merge main"));
         assert!(rebase.contains("--ff-only") && rebase.contains("not_integrated"));
+    }
+
+    #[test]
+    fn supervisor_prompt_is_a_playbook_with_backup_and_escalation_rules() {
+        let prompt = supervisor_prompt("B-1", "safe", false);
+        for needle in [
+            "UNSTICK", "NOT a substitute for human intervention", "when in doubt, escalate",
+            "investigate first", "<db>.logs/<card>-*.log", "git status", "git log", "verify the fix",
+            "workyard orch reclaim", "`Supervisor did:`", "`NEEDS HUMAN:`",
+            "backup/<card>-<timestamp>", "git stash", "Never discard commits or uncommitted work",
+            "Never force-push", "Never rewrite history that is on the target branch",
+            "mechanical (lockfiles, generated files, formatting, import order, identical changes on both sides)",
+            "worktree setup script", "--ff-only", "do NOT widen permissions", "A backoff: wait",
+            "ESCALATE, DO NOT DECIDE", "take no further action on that card",
+        ] {
+            assert!(prompt.contains(needle), "missing {needle:?}");
+        }
+        assert!(!prompt.contains("workyard admin answer"), "the supervisor does not answer questions");
+        assert!(supervisor_prompt("B-1", "safe", true).contains("rebasing"));
     }
 
     #[test]

@@ -59,9 +59,24 @@ Changes found or requested during the first real sample runs (a todo app built b
 ## Orchestrator agent
 
 16. **Supervisor agent beside the script.** **Done, opt-in** (`orch run --supervisor`). The script keeps the lease and
-    the processes; the supervisor is a delegate that acts through the CLI (notes, engineering answers with a
-    recommended option). It behaved well when the CLI was broken. Gaps: no toggle in the desktop; its limits are
-    enforced by its prompt, not by the core; never seen handling a real stuck worker.
+    the processes; the supervisor unsticks the workflow with its shell, git and the CLI (see the rules below). Its
+    limits are enforced by the core (`forbidden_for_supervisor`), not only by its prompt. Gaps: no toggle in the
+    desktop; never seen handling a real stuck worker.
+
+    Rules for the supervisor:
+    - It repairs and re-launches work (mechanics); it never decides what the work should be (judgement), and it is not a
+      substitute for human intervention. When in doubt it escalates.
+    - It investigates first (worker log, `git status`, `git log`, the card), fixes the cause, verifies the fix, then
+      `orch reclaim`s the card or notes the live worker, and records `Supervisor did: ...` on the card.
+    - Before any destructive step: a `backup/<card>-<timestamp>` branch at HEAD and a `git stash`. It never discards
+      commits or uncommitted work, never force-pushes and never rewrites history on the target branch.
+    - It touches the main checkout only to abort a stuck merge or rebase, to move aside a blocking change (with a
+      backup) or to fast-forward a tested branch. It resolves only mechanical conflicts, then re-runs the tests.
+    - Anything needing judgement gets a `NEEDS HUMAN:` card note (problem and options; one desktop notification) and no
+      further action on that card.
+    - The core refuses it: answering or dropping questions, approving, moving cards between lanes, cancelling,
+      force-releasing, transferring, and changing a card's description, scope or dependencies. It may read, add notes,
+      hold and release sessions, resume, and `orch reclaim`.
 
 ## Delivery
 

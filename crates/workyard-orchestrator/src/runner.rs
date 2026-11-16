@@ -117,4 +117,8 @@ pub trait Runner: Send {
     fn checkout(&self) -> Option<std::path::PathBuf> {
         None
     }
+    /// Where each worker's output goes, as `<dir>/<card>-<session>.log`.
+    fn log_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }

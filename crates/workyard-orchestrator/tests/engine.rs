@@ -89,6 +89,9 @@ impl Runner for FakeRunner {
     fn checkout(&self) -> Option<PathBuf> {
         self.checkout.clone()
     }
+    fn log_dir(&self) -> Option<PathBuf> {
+        Some(PathBuf::from("/tmp/fake-board.db.logs"))
+    }
     fn start(&self, launch: &Launch) -> std::io::Result<Box<dyn Worker>> {
         self.launches
             .lock()
@@ -580,6 +583,66 @@ fn a_supervisor_is_started_and_told_about_failures_but_only_when_enabled() {
     h.finish(handle);
 }
 
+#[test]
+fn the_supervisor_digest_carries_the_paths_and_no_question_events() {
+    let h = Harness::new();
+    let repo = repo_with_commit();
+    *h.checkout.lock().unwrap() = Some(repo.clone());
+    let key = h.card("Flaky");
+    let messages = Arc::clone(&h.messages);
+    let stop = Arc::clone(&h.stop);
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            max_failures: 2,
+            max_reclaims: 0,
+            idle_wait: Duration::from_millis(40),
+            supervisor: true,
+            ..Options::default()
+        },
+        move |launch, _| {
+            if launch.card_key == "SUPERVISOR" {
+                wait_until("stop", || stop.load(Ordering::SeqCst));
+            }
+        },
+    );
+    h.wait("supervisor launched", |_| h.launches.lock().unwrap().iter().any(|(card, _, _)| card == "SUPERVISOR"));
+    h.store
+        .raise_question("agent:x", &h.board, "engineering", "Which store?", "", &["A".to_owned(), "B".to_owned()], "A", "Simplest.", &[])
+        .unwrap();
+    h.wait("failure reported", |_| messages.lock().unwrap().iter().any(|m| m.contains("exited without finishing or pausing")));
+    std::thread::sleep(Duration::from_millis(300));
+    h.finish(handle);
+    let all = h.messages.lock().unwrap().join("\n");
+    assert!(all.contains(&format!("worker log /tmp/fake-board.db.logs/{key}-*.log")), "{all}");
+    let lower = key.to_lowercase();
+    assert!(all.contains(&format!("worktree {}", repo.join(".workyard/worktrees").join(&lower).display())), "{all}");
+    assert!(all.contains(&format!("branch workyard/{lower}")), "{all}");
+    assert!(all.contains(&format!("main checkout {}", repo.canonicalize().unwrap_or(repo.clone()).display())) || all.contains(&format!("main checkout {}", repo.display())), "{all}");
+    assert!(!all.contains("Which store?") && !all.contains("raised"), "questions are for humans: {all}");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn a_needs_human_note_triggers_exactly_one_notification() {
+    let h = Harness::new();
+    let key = h.card("Stuck");
+    let stop = Arc::clone(&h.stop);
+    let handle = h.start(1, 3, move |_, _| wait_until("stop", || stop.load(Ordering::SeqCst)));
+    // A launched worker means the orchestrator is past its start-up cursor, so notes are news.
+    h.wait("worker launched", |_| !h.launches.lock().unwrap().is_empty());
+    let sup = format!("agent:supervisor-{}", h.board.to_lowercase());
+    h.store.add_card_note(&sup, &key, "Supervisor did: removed a stale lock").unwrap();
+    h.store.add_card_note(&sup, &key, "NEEDS HUMAN: the conflict changes behaviour. Options: keep ours, keep theirs").unwrap();
+    wait_until("notification", || h.notices.lock().unwrap().iter().any(|(_, b)| b.contains("keep theirs")));
+    std::thread::sleep(Duration::from_millis(300));
+    h.finish(handle);
+    let notices = h.notices.lock().unwrap();
+    assert_eq!(notices.iter().filter(|(_, b)| b.contains(&key) && b.contains("conflict")).count(), 1, "{notices:?}");
+    assert!(!notices.iter().any(|(_, b)| b.contains("stale lock")), "{notices:?}");
+}
+
 fn wait_until(what: &str, condition: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
@@ -663,7 +726,8 @@ fn humans_are_notified_once_per_event_and_not_for_history() {
     };
     ask("Old question"); // raised before the orchestrator ever ran: history, not news
     let handle = h.start(1, 3, |_, _| {});
-    h.wait("lease taken", |s| s.orchestrator_status(&h.board).unwrap()["holder"].is_string());
+    // The cursor is set just after the lease is taken; questions raised before it are history.
+    h.wait("started", |s| s.orchestrator_status(&h.board).unwrap()["cursor"].as_i64().unwrap_or(0) > 0);
     ask("Fresh question");
     wait_until("notification", || h.notices.lock().unwrap().iter().any(|(t, _)| t.contains("question")));
     h.finish(handle);
