@@ -1719,7 +1719,7 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
-pub(crate) const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 21;
 /// Largest markdown report a card may hold.
 pub const MAX_REPORT_BYTES: usize = 256 * 1024;
 

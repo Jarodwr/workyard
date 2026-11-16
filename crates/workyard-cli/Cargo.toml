@@ -1,6 +1,6 @@
 [package]
 name = "workyard-cli"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
@@ -9,6 +9,7 @@ name = "workyard"
 path = "src/main.rs"
 
 [dependencies]
+chrono.workspace = true
 clap.workspace = true
 ctrlc = { version = "3", features = ["termination"] }
 serde_json.workspace = true

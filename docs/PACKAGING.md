@@ -59,7 +59,7 @@ Fall back to `workyard` on `PATH` and `plugin/` in a checkout in dev. Export `WO
 - The dmg mounts (`hdiutil attach -nobrowse -readonly -mountpoint <dir> <dmg>`) and holds `Workyard.app` and an `Applications` link.
 - `claude plugin validate` passes on `…/Resources/marketplace/plugin` and on `…/Resources/marketplace`.
 - `Contents/MacOS/workyard-desktop` starts and stays running (checked with `WORKYARD_DB=<tmp>/t.db` so it does not touch the real database; it created the database).
-- `workyard` has no `--version` flag; use `workyard --help` to smoke-test the bundled CLI.
+- Smoke-test the bundled CLI with `workyard --version` or `workyard doctor`.
 
 The build is only ad-hoc signed (`codesign -dv` shows `Signature=adhoc`, no TeamIdentifier), so Gatekeeper rejects it when downloaded.
 
@@ -100,3 +100,31 @@ open /tmp/Workyard-run.app
 ```
 
 Keep the orchestrator and workers on a CLI built from the same sources (the copy contains it), and only rebuild or run `tauri dev` again once the run has finished.
+
+## Version, `--version` and `workyard doctor`
+
+The version lives in `[workspace.package]` of the root `Cargo.toml`; every crate (including `app/src-tauri`) inherits it with `version.workspace = true`. The JSON manifests (`app/src-tauri/tauri.conf.json`, `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`) are literal.
+
+- `scripts/set-version.sh 0.2.0` changes all of them together (and refreshes `Cargo.lock` offline).
+- `scripts/check-version.sh` fails when they disagree. It runs from `cargo test -p workyard-cli` (`versions_are_consistent_everywhere`); run it in CI as well.
+- `workyard --version` prints `workyard <version>`; with `--json` it prints `{"ok":true,"data":{"version":...,"schema_version":...}}`.
+- `workyard doctor` prints one `OK`/`WARN`/`FAIL` line per check: version, schema, database path (and the orchestrator state of each board), `claude` and `git` (found on `PATH`, with versions), and the plugin directory. `claude` or `git` missing, or an unreadable database, is a FAIL and exits 1; a missing plugin or a database not created yet is a WARN. `--json` returns the same checks as `data.checks`.
+
+## Homebrew layout
+
+The CLI finds its plugin at `<exe dir>/../share/workyard/plugin` after resolving symlinks (Homebrew links `bin/workyard` into the prefix), besides `WORKYARD_PLUGIN_DIR`, the app bundle and a checkout. A formula therefore installs the plugin under `share/workyard`, in the tap's usual shape (see `Formula/fennel-ls-rs.rb` there):
+
+```ruby
+depends_on "rust" => :build
+
+def install
+  system "cargo", "install", *std_cargo_args(path: "crates/workyard-cli")
+  (share/"workyard").install "plugin"
+end
+
+test do
+  assert_match "workyard #{version}", shell_output("#{bin}/workyard --version")
+end
+```
+
+Nothing here has been pushed, tagged or installed into a real Homebrew prefix; the formula, its `head` line, the bottle block and the tap's doc are the user's to add.
