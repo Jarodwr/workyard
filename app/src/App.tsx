@@ -299,6 +299,8 @@ export default function App() {
               cues={cues}
               orchestrator={orchestrator}
               onOrchestratorState={(state) => mutate(() => client.setOrchestratorState(board.key, state))}
+              onStartOrchestrator={() => void mutate(() => client.startOrchestrator(board.key))}
+              onStopOrchestrator={() => void mutate(() => client.stopOrchestrator(board.key))}
               onPlan={() => void mutate(() => client.openPlanner(board.key))}
               onOpenInTerminal={(card) => mutate(() => client.openInTerminal(card.key))}
               onReleaseHold={(card) => mutate(() => client.releaseSessionHold(card.key))}

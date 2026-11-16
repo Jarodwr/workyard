@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ClipboardList, Hourglass, Info, Pause, Play, Waves } from "lucide-react";
+import { ClipboardList, Hourglass, Info, Pause, Play, Square, Waves } from "lucide-react";
 import type { Orchestrator } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Popover } from "@/components/ui/popover";
@@ -11,18 +11,20 @@ type Props = {
   left: ReactNode;
   orchestrator: Orchestrator | null;
   onOrchestratorState: (state: Orchestrator["desired_state"]) => void;
+  onStartOrchestrator: () => void;
+  onStopOrchestrator: () => void;
   onPlan: () => void;
   /** The legend explains the graph's lines, so only the graph shows it. */
   showLegend: boolean;
 };
 
 /** One slim bar: view controls on the left, legend, orchestrator and planner on the right. */
-export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState, onPlan, showLegend }: Props) {
+export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState, onStartOrchestrator, onStopOrchestrator, onPlan, showLegend }: Props) {
   return (
     <div className="mb-2 flex shrink-0 items-center gap-2 rounded-lg border bg-card px-2.5 py-1.5 text-xs">
       <div className="flex min-w-0 flex-1 items-center gap-3">{left}</div>
       {showLegend && <LegendButton />}
-      <OrchestratorControls boardKey={boardKey} orchestrator={orchestrator} onState={onOrchestratorState} />
+      <OrchestratorControls boardKey={boardKey} orchestrator={orchestrator} onState={onOrchestratorState} onStart={onStartOrchestrator} onStop={onStopOrchestrator} />
       <Button size="sm" variant="outline" className="h-7 gap-1.5 px-2.5 text-xs" onClick={onPlan} title="Open a planner agent in your terminal, pointed at this board">
         <ClipboardList className="size-3.5" /> Plan
       </Button>
@@ -52,7 +54,7 @@ function LegendButton() {
   );
 }
 
-function OrchestratorControls({ boardKey, orchestrator, onState }: { boardKey: string; orchestrator: Orchestrator | null; onState: (state: Orchestrator["desired_state"]) => void }) {
+function OrchestratorControls({ boardKey, orchestrator, onState, onStart, onStop }: { boardKey: string; orchestrator: Orchestrator | null; onState: (state: Orchestrator["desired_state"]) => void; onStart: () => void; onStop: () => void }) {
   if (!orchestrator) return null;
   const { connected, desired_state: state } = orchestrator;
   const label = !connected ? "No orchestrator" : state === "running" ? `Running · ${orchestrator.pool_size} at once` : state === "paused" ? "Paused" : "Draining";
@@ -71,6 +73,15 @@ function OrchestratorControls({ boardKey, orchestrator, onState }: { boardKey: s
           <Hourglass className="size-3" />
           until {until?.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
         </span>
+      )}
+      {!connected ? (
+        <Button size="sm" variant="outline" className="h-7 gap-1.5 px-2 text-xs" title={`Start an orchestrator for ${boardKey}: workers run in their own git worktrees`} onClick={onStart}>
+          <Play className="size-3.5" /> Start
+        </Button>
+      ) : (
+        <Button size="icon" variant="ghost" className="size-7" aria-label="Stop the orchestrator" title="Stop: running workers are paused and the board is released" onClick={onStop}>
+          <Square className="size-3.5" />
+        </Button>
       )}
       {state === "running" ? (
         <>

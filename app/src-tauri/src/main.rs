@@ -133,6 +133,97 @@ claude --resume {session}{worktree}\n",
     std::process::Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?;
     Ok(held)
 }
+/// Start the board's orchestrator as a detached `workyard orch run`, in the project's repository,
+/// so it keeps running after the desktop closes. A login shell supplies the user's PATH, which a
+/// GUI app does not inherit, so `claude` can be found. One orchestrator per board still holds:
+/// a second start fails inside `orch run` and its reason is returned here.
+#[tauri::command]
+fn start_orchestrator(board: String) -> Result<Value, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let store = store()?;
+    let view = store.view_board(&board).map_err(|e| e.to_string())?;
+    let key = view["key"].as_str().unwrap_or(&board).to_owned();
+    let status = store.orchestrator_status(&key).map_err(|e| e.to_string())?;
+    if status["connected"] == true {
+        return Err(format!("{key} already has a running orchestrator ({})", status["holder"].as_str().unwrap_or("unknown")));
+    }
+    let repo = repository_for_board(&store, view["id"].as_str().unwrap_or_default());
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("workyard")))
+        .filter(|path| path.exists())
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "workyard".into());
+    let mut logs = store.path().as_os_str().to_owned();
+    logs.push(".logs");
+    let logs = std::path::PathBuf::from(logs);
+    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+    let log_path = logs.join(format!("orchestrator-{}.log", key.to_lowercase()));
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| e.to_string())?;
+    let start = log.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut command = std::process::Command::new("/bin/zsh");
+    command
+        .args(["-l", "-c", "exec \"$0\" \"$@\"", &bin, "orch", "run", &key])
+        .env("WORKYARD_DB", store.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone().map_err(|e| e.to_string())?)
+        .stderr(log);
+    if let Some(repo) = &repo {
+        command.args(["--cwd", repo]);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0); // not tied to this app's process group or terminal
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(Some(exit)) = child.try_wait() {
+            // It stopped at once: the log says why (another orchestrator, claude not found, ...).
+            let mut tail = String::new();
+            if let Ok(mut file) = std::fs::File::open(&log_path) {
+                let _ = file.seek(SeekFrom::Start(start));
+                let _ = file.read_to_string(&mut tail);
+            }
+            return Err(format!("the orchestrator exited ({exit}): {}", tail.trim()));
+        }
+        if store.orchestrator_status(&key).map(|s| s["connected"] == true).unwrap_or(false) {
+            break;
+        }
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait(); // reap it if it ends while the desktop is open
+    });
+    wrap(store.orchestrator_status(&key))
+}
+
+/// Ask the board's orchestrator to stop. It pauses its workers and releases the lease on the
+/// way out, exactly as on Ctrl-C. Only possible for one running on this machine.
+#[tauri::command]
+fn stop_orchestrator(board: String) -> Result<Value, String> {
+    let store = store()?;
+    let status = store.orchestrator_status(&board).map_err(|e| e.to_string())?;
+    if status["connected"] != true {
+        return wrap(Ok(status));
+    }
+    if status["host"].as_str() != Some(workyard_orchestrator::hostname().as_str()) {
+        return Err("that orchestrator runs on another machine".into());
+    }
+    let pid = status["pid"].as_i64().ok_or("the orchestrator did not record a process id")?;
+    std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .map_err(|e| e.to_string())?;
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if store.orchestrator_status(&board).map(|s| s["connected"] != true).unwrap_or(false) {
+            break;
+        }
+    }
+    wrap(store.orchestrator_status(&board))
+}
+
 /// Open a planner agent in the default terminal, pointed at one board. It gets the planner skill
 /// as extra system prompt (so the plugin need not be installed) and acts as its own actor.
 #[tauri::command]
@@ -229,6 +320,8 @@ fn main() {
             approve_change,
             open_in_terminal,
             open_planner,
+            start_orchestrator,
+            stop_orchestrator,
             release_session_hold,
             orchestrator_status,
             set_orchestrator_state

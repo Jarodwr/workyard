@@ -69,6 +69,8 @@ export const api = {
   unassignQuestionStakeholder: (question: Question) => invoke<Question>("unassign_question_stakeholder", { question: question.key, expectedVersion: question.version }),
   openInTerminal: (card: string) => invoke<TaskSession>("open_in_terminal", { card }),
   openPlanner: (board: string) => invoke<{ board: string }>("open_planner", { board }),
+  startOrchestrator: (board: string) => invoke<Orchestrator>("start_orchestrator", { board }),
+  stopOrchestrator: (board: string) => invoke<Orchestrator>("stop_orchestrator", { board }),
   releaseSessionHold: (card: string) => invoke<TaskSession>("release_session_hold", { card }),
   approveChange: (change: CardChange) => invoke<CardChange>("approve_change", { change: change.id, expectedVersion: change.version }),
   orchestratorStatus: (board: string) => invoke<Orchestrator>("orchestrator_status", { board }),
@@ -128,6 +130,8 @@ function demoEvent(type: string, entityId: string) {
 const demoApi = {
   openInTerminal: async (_card: string): Promise<TaskSession> => { throw new Error("Opening a terminal needs the desktop app"); },
   openPlanner: async (_board: string): Promise<{ board: string }> => { throw new Error("Opening a planner needs the desktop app"); },
+  startOrchestrator: async (_board: string): Promise<Orchestrator> => { throw new Error("Starting an orchestrator needs the desktop app"); },
+  stopOrchestrator: async (_board: string): Promise<Orchestrator> => { throw new Error("Stopping an orchestrator needs the desktop app"); },
   releaseSessionHold: async (_card: string): Promise<TaskSession> => { throw new Error("Releasing a hold needs the desktop app"); },
   approveChange: async (change: CardChange): Promise<CardChange> => ({ ...clone(change), approved_commit_oid: change.commit_oid, reviewer: "demo", version: change.version + 1 }),
   orchestratorStatus: async (board: string): Promise<Orchestrator> => ({ ...clone(demoOrchestrator), board_key: board }),

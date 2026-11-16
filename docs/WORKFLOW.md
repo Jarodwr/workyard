@@ -19,11 +19,13 @@ Then open the desktop and review what it made: the phase graph (order, chokepoin
 
 ## 2. Run
 
+From the desktop, open the board and press **Start** in the toolbar. It starts `workyard orch run` detached in the project's repository, so it keeps running if you close the app; **Stop** (the square) ends it the same way Ctrl-C does. Output goes to `<db>.logs/orchestrator-<board>.log`, and if it exits straight away (another orchestrator holds the board, `claude` not found) the reason is shown. It runs through a login shell so it finds `claude` on your PATH; if you set PATH only in `.zshrc`, start it from a terminal instead:
+
 ```sh
 workyard orch run B-1 --cwd /path/to/repo --pool 2
 ```
 
-- It stays in the foreground; Ctrl-C stops the workers, pauses their sessions, and releases the board.
+- From a terminal it stays in the foreground; Ctrl-C stops the workers, pauses their sessions, and releases the board.
 - Each worker runs `claude -p` in its own git worktree (`.claude/worktrees/<card>`) on its own branch. Investigations (`--workspace none`) run in the repository without a worktree.
 - Only one orchestrator can hold a board; a second `orch run` is refused and names the holder.
 - macOS notifications tell you when a question needs an answer, a commit needs review, a card needs a human, or the board is waiting on a usage limit. Add `--no-notify` to silence them.

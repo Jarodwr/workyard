@@ -31,6 +31,8 @@ type Props = {
   cues: Record<string, string>;
   orchestrator: Orchestrator | null;
   onOrchestratorState: (state: Orchestrator["desired_state"]) => void;
+  onStartOrchestrator: () => void;
+  onStopOrchestrator: () => void;
   onPlan: () => void;
   onOpenInTerminal: (card: Card) => Promise<boolean>;
   onReleaseHold: (card: Card) => Promise<boolean>;
@@ -59,6 +61,8 @@ export function BoardView({
   cues,
   orchestrator,
   onOrchestratorState,
+  onStartOrchestrator,
+  onStopOrchestrator,
   onPlan,
   onOpenInTerminal,
   onReleaseHold,
@@ -107,6 +111,8 @@ export function BoardView({
         left={view === "dependencies" ? graphControls : phaseControls}
         orchestrator={orchestrator}
         onOrchestratorState={onOrchestratorState}
+        onStartOrchestrator={onStartOrchestrator}
+        onStopOrchestrator={onStopOrchestrator}
         onPlan={onPlan}
         showLegend={view === "dependencies"}
       />
