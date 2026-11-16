@@ -87,6 +87,17 @@ Tauri copies the staged `app/src-tauri/binaries/workyard-<triple>` over `target/
 - `scripts/stage-sidecar.sh --check` builds nothing and exits non-zero with a message if the staged binary is missing, a placeholder, or older than any file in `crates/`, `Cargo.toml` or `Cargo.lock`. Run it in CI before packaging, or from a test.
 - On a fresh checkout or new worktree `app/src-tauri/build.rs` writes a placeholder script into `binaries/` when nothing is staged, so `cargo check/test --workspace` work without staging. The placeholder only exits with an error; `--check` rejects it, and the real build commands above replace it.
 
+Debug-profile builds of the desktop crate no longer do that copy at all: `build.rs` sets a `TAURI_CONFIG` patch that empties `bundle.externalBin` for the `debug` profile (unless `TAURI_CONFIG` is already set, as `tauri dev` does). `target/debug/workyard` is therefore always the CLI crate's own output, so `cargo test --workspace` gives the same result whichever crate builds first. Release builds and the bundler still use the staged sidecar.
+
+## Sharing one build directory across worktrees
+
+Workers may share a `CARGO_TARGET_DIR` (`--worker-env CARGO_TARGET_DIR=...`) across worktrees. This is safe because cargo keys its fingerprints on the package path, so each worktree rebuilds only what differs and reuses the rest. What to keep in mind:
+
+- Tests must not bake checkout paths into the binary. Use `std::env::var("CARGO_MANIFEST_DIR")` and `std::env::var("CARGO_BIN_EXE_workyard")` inside the test, never `env!(..)`/`option_env!(..)`/`file!()` for a path, because the test binary can outlive the worktree that compiled it (the orchestrator removes a worktree once its card is merged). A baked path shows up as `No such file or directory` under `.workyard/worktrees/c-N/...`.
+- If a test binary still points into a deleted worktree (older code, or a new `env!` slipped in), `cargo clean -p workyard-cli` (or the affected package) forces a rebuild; no need to wipe the whole directory.
+- Concurrent cargo runs on one target directory serialise on its lock, so they are slow but not unsafe. Do not share the directory between different toolchains or `RUSTFLAGS` unless you accept full rebuilds.
+- Release packaging uses its own `target/release` and the freshly staged sidecar; do not package from a shared directory another worker may be building into.
+
 ## Hazard: `tauri dev` migrates a database that workers still use
 
 `tauri dev` rebuilds and relaunches the desktop whenever `crates/workyard-core` changes. The new desktop opens the database and can migrate it, while a running orchestrator and its workers (an older binary) still use the same file. They then fail with `schema_too_new`, or worse, work against a schema they do not understand.

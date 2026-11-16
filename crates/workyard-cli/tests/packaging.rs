@@ -3,7 +3,15 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const EXE: &str = env!("CARGO_BIN_EXE_workyard");
+/// Resolved when the test runs, not when it compiles: `env!` would bake the absolute path of the
+/// checkout that built the test binary into it, which dangles once that worktree is removed.
+fn exe() -> String {
+    std::env::var("CARGO_BIN_EXE_workyard").expect("cargo sets CARGO_BIN_EXE_workyard when running tests")
+}
+
+fn root() -> PathBuf {
+    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR when running tests")).join("../..")
+}
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("workyard-{name}-{}", std::process::id()));
@@ -14,10 +22,10 @@ fn temp_dir(name: &str) -> PathBuf {
 
 #[test]
 fn version_prints_name_and_version_and_json_adds_schema() {
-    let out = Command::new(EXE).arg("--version").output().unwrap();
+    let out = Command::new(exe()).arg("--version").output().unwrap();
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), format!("workyard {}", env!("CARGO_PKG_VERSION")));
-    let out = Command::new(EXE).args(["--version", "--json"]).output().unwrap();
+    let out = Command::new(exe()).args(["--version", "--json"]).output().unwrap();
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["data"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(value["data"]["schema_version"].as_i64().unwrap() > 0);
@@ -33,7 +41,7 @@ fn doctor_fails_when_claude_is_missing() {
     std::fs::write(&git, "#!/bin/sh\necho 'git version 0.0-fake'\n").unwrap();
     std::fs::set_permissions(&git, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let run = |json: bool| {
-        let mut cmd = Command::new(EXE);
+        let mut cmd = Command::new(exe());
         cmd.env("PATH", &bin).args(["--db", dir.join("t.db").to_str().unwrap()]);
         if json {
             cmd.arg("--json");
@@ -65,7 +73,7 @@ fn doctor_passes_with_claude_and_git_present() {
         std::fs::write(&path, format!("#!/bin/sh\necho '{tool} 1.2.3'\n")).unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     }
-    let out = Command::new(EXE)
+    let out = Command::new(exe())
         .env("PATH", &bin)
         .env("WORKYARD_PLUGIN_DIR", dir.join("plugin"))
         .args(["--db", dir.join("t.db").to_str().unwrap(), "doctor"])
@@ -77,7 +85,7 @@ fn doctor_passes_with_claude_and_git_present() {
 
 #[test]
 fn versions_are_consistent_everywhere() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = root();
     let out = Command::new("sh").arg(root.join("scripts/check-version.sh")).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }

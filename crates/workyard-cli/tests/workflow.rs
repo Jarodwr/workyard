@@ -2,6 +2,12 @@ use std::process::Command;
 
 use serde_json::Value;
 
+/// Resolved when the test runs, not when it compiles: `env!` would bake the absolute path of the
+/// checkout that built the test binary into it, which dangles once that worktree is removed.
+fn exe() -> String {
+    std::env::var("CARGO_BIN_EXE_workyard").expect("cargo sets CARGO_BIN_EXE_workyard when running tests")
+}
+
 #[test]
 fn cli_json_workflow_uses_one_event_per_write() {
     let nonce = std::time::SystemTime::now()
@@ -11,9 +17,9 @@ fn cli_json_workflow_uses_one_event_per_write() {
     let dir = std::env::temp_dir().join(format!("workyard-cli-test-{nonce}"));
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("board.db");
-    let exe = env!("CARGO_BIN_EXE_workyard");
+    let exe = exe();
     let call = |actor: &str, args: &[&str]| -> Value {
-        let output = Command::new(exe)
+        let output = Command::new(&exe)
             .args(["--db", db.to_str().unwrap(), "--actor", actor, "--json"])
             .args(args)
             .output()
@@ -104,7 +110,7 @@ fn cli_phases_and_cancellation_control_next_work() {
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("board.db");
     let call = |args: &[&str]| -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_workyard"))
+        let output = Command::new(exe())
             .args(["--db", db.to_str().unwrap(), "--json"])
             .args(args)
             .output()
@@ -146,7 +152,7 @@ fn cli_session_commands_select_paused_work_before_backlog() {
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("board.db");
     let call = |args: &[&str]| -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_workyard"))
+        let output = Command::new(exe())
             .args(["--db", db.to_str().unwrap(), "--json"])
             .args(args)
             .output()
@@ -185,7 +191,7 @@ fn cli_orchestrator_lease_pause_dispatch_and_follow() {
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("board.db");
     let run = |actor: &str, args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_workyard"))
+        let output = Command::new(exe())
             .args(["--db", db.to_str().unwrap(), "--actor", actor, "--json"])
             .args(args)
             .output()
@@ -204,7 +210,7 @@ fn cli_orchestrator_lease_pause_dispatch_and_follow() {
     call("cli", &["task", "add-card", key, "Second"]);
 
     // A follower started now sees every later commit without polling the database.
-    let mut follower = Command::new(env!("CARGO_BIN_EXE_workyard"))
+    let mut follower = Command::new(exe())
         .args(["--db", db.to_str().unwrap(), "events", "--follow", "--since", "0"])
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -269,9 +275,9 @@ fn cli_review_setting_permissions_and_integration_pause() {
     let dir = std::env::temp_dir().join(format!("workyard-cli-test-{nonce}"));
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("board.db");
-    let exe = env!("CARGO_BIN_EXE_workyard");
+    let exe = exe();
     let run = |args: &[&str]| -> (bool, Value) {
-        let output = Command::new(exe)
+        let output = Command::new(&exe)
             .args(["--db", db.to_str().unwrap(), "--actor", "agent:w", "--json"])
             .args(args)
             .output()
@@ -306,7 +312,7 @@ fn cli_review_setting_permissions_and_integration_pause() {
 #[test]
 fn cli_permission_flags_become_claude_arguments() {
     // Run the `--help` text rather than a worker: the contract is that full is the default.
-    let help = Command::new(env!("CARGO_BIN_EXE_workyard")).args(["orch", "run", "--help"]).output().unwrap();
+    let help = Command::new(exe()).args(["orch", "run", "--help"]).output().unwrap();
     let text = String::from_utf8_lossy(&help.stdout);
     assert!(text.contains("--permissions") && text.contains("[default: full]"), "{text}");
     assert!(text.contains("--allow"), "{text}");
@@ -319,7 +325,7 @@ fn cli_permission_requests_are_listed_and_only_a_human_may_decide_them() {
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("board.db");
     let run = |actor: &str, args: &[&str]| -> (bool, Value) {
-        let output = Command::new(env!("CARGO_BIN_EXE_workyard"))
+        let output = Command::new(exe())
             .args(["--db", db.to_str().unwrap(), "--actor", actor, "--json"])
             .args(args)
             .output()
@@ -346,7 +352,7 @@ fn cli_status_and_wait_report_why_and_time_out() {
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("board.db");
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_workyard")).args(["--db", db.to_str().unwrap(), "--actor", "agent:one"]).args(args).output().unwrap()
+        Command::new(exe()).args(["--db", db.to_str().unwrap(), "--actor", "agent:one"]).args(args).output().unwrap()
     };
     let json = |args: &[&str]| -> Value {
         let mut all = vec!["--json"];

@@ -21,6 +21,18 @@ fn main() {
             }
         }
     }
+    // tauri_build copies the staged sidecar over target/<profile>/workyard, which is where the CLI
+    // crate builds to. In dev and test builds that file is the CLI itself (the dev app finds its
+    // sidecar next to its own executable), so the copy could only replace a fresh CLI with a stale
+    // or placeholder one, depending on build order. Skip it for the debug profile; release builds
+    // and the bundler (which reads tauri.conf.json itself) still ship the staged sidecar.
+    if env::var("PROFILE").as_deref() == Ok("debug") && env::var_os("TAURI_CONFIG").is_none() {
+        let patch = r#"{"bundle":{"externalBin":[]}}"#;
+        // SAFETY: the build script is single-threaded here.
+        unsafe { env::set_var("TAURI_CONFIG", patch) };
+        println!("cargo:rustc-env=TAURI_CONFIG={patch}");
+    }
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
     println!("cargo:rerun-if-changed=binaries");
     tauri_build::build();
 }
