@@ -23,7 +23,12 @@ Run `workyard --json projects`, `boards`, and `board <B-1>` for anything related
 - Phases are the delivery order, not milestones. `plan phase add <B-1> "Name" --description "..."`. Work is done in the current phase first; a card can depend only on the same or an earlier phase.
 - One card is one worker session: small enough to finish and review in one sitting, with a description that states what done means. Split anything bigger.
 - `task add-card <B-1> "Title" --desc "..." --phase "Name" --agent-type Frontend`. Cards get their own git worktree by default. Add `--workspace none` for investigations, research, and decisions that change no repository.
-- Do not create two cards that edit the same files in parallel unless one depends on the other.
+- Keep cards from overlapping. Cards run in parallel, and in an earlier sample one card built what another was meant to build.
+  - Give every card a distinct set of files or behaviour. Before adding a card, check that no other card already covers it.
+  - State the files it owns in the description ("Owns: `crates/workyard-core/src/export.rs`, `docs/EXPORT.md`"), and say which files it must not touch.
+  - If two cards must touch the same file, sequence them: `task depend C-3 --on C-2`, never parallel. Use `--scope finish` when only the merge order matters.
+  - Say what done means: observable behaviour, the tests or commands that must pass, and the docs that must change.
+  - Example, bad: C-1 "Add export command" and C-2 "Export to CSV", both editing `export.rs` with no dependency, so C-2 rebuilds the command C-1 is writing. Good: C-1 "Export command skeleton" owns `export.rs` and is done when `workyard export --json` prints the board. C-2 "CSV format" depends on C-1, adds `export/csv.rs`, and is done when `cargo test export_csv` passes.
 
 ## 4. Order and decisions
 
