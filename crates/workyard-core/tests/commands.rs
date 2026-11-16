@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use serde_json::json;
 use workyard_core::Store;
 use workyard_core::types::{Progress, QuestionKind, QuestionOptions, QuestionOutcome, Version};
 
@@ -337,7 +338,7 @@ fn v7_database_gets_phases_and_preserves_existing_work() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        17
     );
 }
 
@@ -461,8 +462,69 @@ fn start_dependency_cannot_be_bypassed_by_moving_directly_to_done() {
 }
 
 #[test]
+fn later_phase_work_is_offered_after_current_but_never_before() {
+    let (_dir, store, board) = setup();
+    store.add_phase("agent", &board, "Second").unwrap();
+    store.add_phase("agent", &board, "Third").unwrap();
+    let mk = |title: &str, phase: Option<&str>| {
+        store
+            .create_card_in_phase("agent", &board, title, "", "P2", None, "", phase)
+            .unwrap()
+    };
+    let third = mk("Third task", Some("Third"));
+    let second = mk("Second task", Some("Second"));
+    let current = mk("Current task", None);
+    assert_eq!(store.orchestrator_status(&board).unwrap()["held_back_by_phase"], 0);
+    assert_eq!(store.next_ready_task(&board, None).unwrap()["key"], current["key"]);
+    store.claim_card("agent", current["key"].as_str().unwrap(), 1).unwrap();
+    assert_eq!(store.next_ready_task(&board, None).unwrap()["key"], second["key"]);
+    store.claim_card("agent", second["key"].as_str().unwrap(), 1).unwrap();
+    // Two phases ahead is offered, and can be claimed.
+    assert_eq!(store.next_ready_task(&board, None).unwrap()["key"], third["key"]);
+    store.claim_card("agent", third["key"].as_str().unwrap(), 1).unwrap();
+}
+
+#[test]
+fn phase_window_limits_what_is_offered_and_is_reported() {
+    let (_dir, store, board) = setup();
+    store.add_phase("agent", &board, "Second").unwrap();
+    store.add_phase("agent", &board, "Third").unwrap();
+    let mk = |title: &str, phase: Option<&str>| {
+        store
+            .create_card_in_phase("agent", &board, title, "", "P2", None, "", phase)
+            .unwrap()
+    };
+    let current = mk("Current task", None);
+    let second = mk("Second task", Some("Second"));
+    let third = mk("Third task", Some("Third"));
+    let window = store.set_board_phase_window("agent", &board, Some(1)).unwrap();
+    assert_eq!(window["phase_window"], 1);
+    let status = store.orchestrator_status(&board).unwrap();
+    assert_eq!(status["held_back_by_phase"], 2);
+    assert_eq!(status["held_back_cards"], json!([second["key"], third["key"]]));
+    assert_eq!(
+        store.claim_card("agent", second["key"].as_str().unwrap(), 1).unwrap_err().code,
+        "current_phase_queue_not_empty"
+    );
+    store.claim_card("agent", current["key"].as_str().unwrap(), 1).unwrap();
+    assert_eq!(store.next_ready_task(&board, None).unwrap()["key"], second["key"]);
+    assert_eq!(store.orchestrator_status(&board).unwrap()["held_back_by_phase"], 1);
+    assert_eq!(
+        store.claim_card("agent", third["key"].as_str().unwrap(), 1).unwrap_err().code,
+        "phase_planned"
+    );
+    store.set_board_phase_window("agent", &board, None).unwrap();
+    assert_eq!(store.orchestrator_status(&board).unwrap()["held_back_by_phase"], 0);
+    assert_eq!(store.set_board_phase_window("agent", &board, Some(0)).unwrap_err().code, "validation_error");
+    assert!(workyard_core::parse_phase_window("all").unwrap().is_none());
+    assert_eq!(workyard_core::parse_phase_window("2").unwrap(), Some(2));
+    assert!(workyard_core::parse_phase_window("x").is_err());
+}
+
+#[test]
 fn next_phase_work_starts_only_when_current_queue_is_exhausted() {
     let (_dir, store, board) = setup();
+    store.set_board_phase_window("agent", &board, Some(1)).unwrap();
     let future = store.add_phase("agent", &board, "Integration").unwrap();
     let current = store
         .create_card("agent", &board, "Current task", "", "P2", None)
@@ -799,7 +861,7 @@ fn existing_v1_database_migrates_to_agent_types_and_notes() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
 }
 
 #[test]
