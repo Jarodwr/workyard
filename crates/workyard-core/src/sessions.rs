@@ -88,7 +88,15 @@ pub(crate) fn resume_eligible(db: &Connection, card: &Value, session: &Value) ->
             |row| row.get(0),
         )?;
         if status == "open" {
-            return Ok(false);
+            // The question stays open, but a human message in its thread that the worker has not
+            // been told about wakes it to reply (it then pauses on the question again).
+            return Ok(session["waiting_review"] != true
+                && session["waiting_integration"] != true
+                && crate::threads::human_message_after(
+                    db,
+                    question_id,
+                    session["last_delivered_event_id"].as_i64().unwrap_or(0),
+                )?);
         }
     }
     if session["waiting_review"] == true {
@@ -108,6 +116,18 @@ pub(crate) fn resume_eligible(db: &Connection, card: &Value, session: &Value) ->
         }
     }
     Ok(waits || card["ready"] == true)
+}
+
+/// Why an eligible paused session is offered for resume: `thread_message` when a human wrote in
+/// the thread of the still-open question it waits on, otherwise `resolved`.
+pub(crate) fn resume_reason(db: &Connection, session: &Value) -> Result<&'static str> {
+    if let Some(question_id) = session["waiting_question_id"].as_str() {
+        let status: String = db.query_row("SELECT status FROM questions WHERE id=?1", [question_id], |row| row.get(0))?;
+        if status == "open" {
+            return Ok("thread_message");
+        }
+    }
+    Ok("resolved")
 }
 
 pub(crate) fn detach_for_card(db: &Connection, card_id: &str) -> Result<()> {

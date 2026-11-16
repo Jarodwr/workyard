@@ -20,6 +20,8 @@ pub use orchestrator::parse_env_pair;
 pub use phases::parse_phase_window;
 mod projects;
 mod sessions;
+mod threads;
+pub use threads::{MAX_MESSAGE_CHARS, is_human_actor};
 
 pub mod types;
 use types::{
@@ -1601,6 +1603,9 @@ impl Store {
                 blocked_cards.push(card?);
             }
             row["blocks"] = json!(blocked_cards);
+            let (messages, unread) = threads::counts(&db, &id)?;
+            row["message_count"] = json!(messages);
+            row["unread_messages"] = json!(unread);
             if let Some(stakeholder_id) = row["stakeholder_id"].as_str() {
                 row["stakeholder"] = db.query_row("SELECT name,role,contact FROM project_stakeholders WHERE id=?1", [stakeholder_id], |r| Ok(json!({"name":r.get::<_,String>(0)?,"role":r.get::<_,String>(1)?,"contact":r.get::<_,String>(2)?})))?;
             }
@@ -1658,6 +1663,7 @@ impl Store {
         if let Some((_, mut card)) = best_resume {
             card["dispatch_action"] = json!("resume");
             card["session"] = json!(sessions::active_session(&db, card["id"].as_str().unwrap())?);
+            card["resume_reason"] = json!(sessions::resume_reason(&db, &card["session"])?);
             return Ok(card);
         }
         let window = phases::phase_window(&db, &board_id)?;
@@ -1747,7 +1753,7 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 /// Largest markdown report a card may hold.
 pub const MAX_REPORT_BYTES: usize = 256 * 1024;
 
@@ -1979,6 +1985,15 @@ fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 21")?;
+        version = 21;
+    }
+    if version == 21 {
+        tx.execute_batch(include_str!("../migrations/022.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (22,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 22")?;
     }
     tx.commit()?;
     Ok(())
