@@ -44,6 +44,14 @@ fn poll_events(since: i64, limit: i64) -> Result<Value, String> {
     wrap(store()?.poll_events(since, limit))
 }
 #[tauri::command]
+fn pending_permissions(board: String) -> Result<Value, String> {
+    wrap(store()?.permission_requests(&board, Some("pending")))
+}
+#[tauri::command]
+fn decide_permission(request: String, decision: String) -> Result<Value, String> {
+    wrap(store()?.permission_decide("ui", &request, &decision, None, ""))
+}
+#[tauri::command]
 fn list_questions() -> Result<Value, String> {
     wrap(store()?.list_questions(None, None))
 }
@@ -490,7 +498,9 @@ fn main() {
             agent_log_tail,
             set_board_review_required,
             orchestrator_status,
-            set_orchestrator_state
+            set_orchestrator_state,
+            pending_permissions,
+            decide_permission
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Workyard");

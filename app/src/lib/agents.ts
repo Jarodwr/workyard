@@ -1,4 +1,4 @@
-import type { Board, Card, Question } from "@/api";
+import type { Board, Card, PermissionRequest, Question } from "@/api";
 
 export type AgentStateKind = "running" | "question" | "review" | "integration" | "held" | "paused";
 
@@ -79,4 +79,18 @@ export function progressDisplay(card: Card, now = Date.now()): { value: number; 
   const attached = session.attached_at ? Date.parse(session.attached_at) : NaN;
   const secs = Number.isNaN(attached) ? session.elapsed_secs ?? 0 : Math.max(0, (now - attached) / 1000);
   return { value: estimateProgress(session.tool_uses ?? 0, secs), estimated: true };
+}
+
+/** The requests that hold this card's worker. */
+export function permissionsFor(card: Card, requests: PermissionRequest[]): PermissionRequest[] {
+  return requests.filter((request) => request.status === "pending" && request.card_key === card.key);
+}
+
+/** What "Allow for this run" grants, as the core will derive it: a Bash command's first word, else the tool. */
+export function runRuleFor(request: Pick<PermissionRequest, "tool_name" | "input">): string {
+  if (request.tool_name === "Bash") {
+    const first = String(request.input?.command ?? "").trim().split(/\s+/)[0];
+    if (first) return `Bash(${first} *)`;
+  }
+  return request.tool_name;
 }

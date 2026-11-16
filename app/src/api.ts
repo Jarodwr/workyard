@@ -67,6 +67,9 @@ export type Question = { id: string; key: string; board_id: string; phase_id: st
 export type Dependency = { id: string; from_card_id: string; to_card_id: string | null; to_question_id: string | null; scope?: "start" | "finish" };
 export type CardChange = { id: string; version: number; repository_id: string; working_branch: string; target_branch: string; commit_oid: string; review_required: boolean; approved_commit_oid: string | null; reviewer: string | null };
 export type Orchestrator = { board_key: string; desired_state: "running" | "paused" | "draining"; pool_size: number; connected: boolean; holder: string | null; epoch: number; heartbeat_at: string | null; backing_off: boolean; backoff_until: string | null; backoff_reason: string; permissions?: "full" | "safe" };
+/** A tool a safe-mode worker is waiting on a human to approve. */
+export type PermissionRequest = { id: string; board_key: string; card_key: string; request_id: string; tool_name: string; input: Record<string, unknown>; description: string; status: "pending" | "allowed_once" | "allowed_run" | "denied" | "expired"; run_rule: string; created_at: string };
+export type PermissionDecision = "allow_once" | "allow_run" | "deny";
 /** One readable line of a worker's output, parsed from its stream-json log. */
 export type AgentLogRow = { kind: "text" | "tool" | "result" | "error" | "user"; text: string; tool?: string };
 export type CardNote = { id: string; card_id: string; actor: string; body: string; created_at: string };
@@ -97,6 +100,8 @@ export const api = {
   approveChange: (change: CardChange) => invoke<CardChange>("approve_change", { change: change.id, expectedVersion: change.version }),
   orchestratorStatus: (board: string) => invoke<Orchestrator>("orchestrator_status", { board }),
   setOrchestratorState: (board: string, state: Orchestrator["desired_state"]) => invoke<Orchestrator>("set_orchestrator_state", { board, state }),
+  pendingPermissions: (board: string) => invoke<PermissionRequest[]>("pending_permissions", { board }),
+  decidePermission: (request: string, decision: PermissionDecision) => invoke<PermissionRequest>("decide_permission", { request, decision }),
 };
 
 export const isDemo = !("__TAURI_INTERNALS__" in window);
@@ -159,6 +164,8 @@ const demoApi = {
   stopOrchestrator: async (_board: string): Promise<Orchestrator> => { throw new Error("Stopping an orchestrator needs the desktop app"); },
   releaseSessionHold: async (_card: string): Promise<TaskSession> => { throw new Error("Releasing a hold needs the desktop app"); },
   holdSession: async (_card: string): Promise<TaskSession> => { throw new Error("Stopping an agent needs the desktop app"); },
+  pendingPermissions: async (_board: string): Promise<PermissionRequest[]> => [],
+  decidePermission: async (_request: string, _decision: PermissionDecision): Promise<PermissionRequest> => { throw new Error("Deciding a request needs the desktop app"); },
   agentLogTail: async (card: string, _limit = 60): Promise<AgentLogRow[]> => [
     { kind: "user", text: `You are working Workyard card ${card} on board B-1.` },
     { kind: "text", text: "I'll read the card, then write the storage module and its tests." },
