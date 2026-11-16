@@ -7,6 +7,7 @@ import { client, type Board, type Card, type Dependency, type Project, type Ques
 import { AgentTerminalButton } from "@/components/workspace/agent-terminal-button";
 import { stateTone } from "@/components/workspace/agents-dock";
 import { agentState } from "@/lib/agents";
+import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard } from "@/components/ui/card";
@@ -224,7 +225,13 @@ export function DependencyView({
                         {node.chokepoint && <Badge variant="outline" className={cn(agent ? "" : "ml-auto", "border-violet-500/30 bg-violet-500/10 px-1 py-0 text-[9px] text-violet-700 dark:text-violet-300")}><GitFork className="size-3" />Holds {node.impact}</Badge>}
                       </span>
                       <strong className="mt-1 line-clamp-2 w-full text-xs leading-4">{node.title}</strong>
-                      <span className={cn("mt-auto w-full truncate pr-12 text-[10px] text-muted-foreground", running && card?.session?.activity && "text-primary")} title={running ? card?.session?.activity : undefined}>{node.cancelled ? `Cancelled: ${card?.cancellation_reason ?? ""}` : card ? (running && card.session?.activity ? card.session.activity : node.detail) : questionOnlyCount > 0 ? `Only questions block ${questionOnlyCount} task${questionOnlyCount === 1 ? "" : "s"}` : question?.recommended_option ? `Suggests: ${question.recommended_option}` : node.resolved ? "Resolved" : "Open"}</span>
+                      {card && (
+                        <span className="mt-auto flex w-full items-center gap-1.5" aria-label={`${card.progress}% complete`}>
+                          <Progress value={card.progress} className="h-1 flex-1" />
+                          <span className="w-7 text-right text-[9px] tabular-nums leading-none text-muted-foreground">{card.progress}%</span>
+                        </span>
+                      )}
+                      <span className={cn("w-full truncate pr-12 text-[10px] text-muted-foreground", card ? "mt-1" : "mt-auto", running && card?.session?.activity && "text-primary")} title={running ? card?.session?.activity : undefined}>{node.cancelled ? `Cancelled: ${card?.cancellation_reason ?? ""}` : card ? (running && card.session?.activity ? card.session.activity : node.detail) : questionOnlyCount > 0 ? `Only questions block ${questionOnlyCount} task${questionOnlyCount === 1 ? "" : "s"}` : question?.recommended_option ? `Suggests: ${question.recommended_option}` : node.resolved ? "Resolved" : "Open"}</span>
                     </button>
                     {question && <div className="absolute right-1.5 top-1.5"><StakeholderPicker question={question} stakeholders={stakeholders} compact onAssign={(stakeholderId)=>onAssignStakeholder(question,stakeholderId)} /></div>}
                     {card && <AgentTerminalButton card={card} onOpen={onOpenInTerminal} onRelease={onReleaseHold} className="absolute bottom-1.5 right-7" />}
