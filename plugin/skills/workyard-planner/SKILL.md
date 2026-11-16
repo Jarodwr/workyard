@@ -13,7 +13,7 @@ Run `workyard --json projects`, `boards`, and `board <B-1>` for anything related
 
 ## 2. Project context
 
-- `plan create-project "Name" --description "..."`, then `plan add-repository <project> <path> --target-branch main`. Workers' worktrees are created inside this repository.
+- `plan create-project "Name" --description "..."`, then `plan add-repository <project> <path> --target-branch main`. Workers' worktrees are created inside it, under `.workyard/worktrees/`, and they merge their own work into the target branch. Review is off by default; turn it on for a board with `plan board-review <B-1> on`.
 - `plan add-document <project> <repository> <path> --kind adr|diagram|documentation --title "..."` for the docs workers should read.
 - `plan add-stakeholder <project> "Name" --role "..."` for people who answer business questions.
 

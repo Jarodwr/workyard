@@ -1,0 +1,13 @@
+{
+  "name": "workyard",
+  "owner": { "name": "Workyard" },
+  "metadata": { "description": "Workyard: a local kanban that humans and coding agents share." },
+  "plugins": [
+    {
+      "name": "workyard",
+      "source": "./plugin",
+      "description": "Work on Workyard board cards through the local workyard CLI.",
+      "version": "0.1.0"
+    }
+  ]
+}

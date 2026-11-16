@@ -8,3 +8,5 @@
 /app/.yarn/install-state.gz
 *.tsbuildinfo
 .DS_Store
+/app/src-tauri/binaries/
+/app/src-tauri/gen/schemas/

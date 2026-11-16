@@ -30,7 +30,7 @@ The frontend uses Tailwind CSS 4 with local shadcn/ui components in `app/src/com
 
 The Rust core, CLI, Tauri bridge, and React board have initial implementations. A separate demo script can simulate external card moves. The SQLite migrations, core tests, a CLI workflow test, a Tauri binary build, and the frontend production build pass. The desktop animation acceptance check has been reviewed and accepted.
 
-The current UI starts with projects. Selecting one shows Overview, then separate Stakeholders and Boards sections in the sidebar. Each stakeholder row shows their pending question count. Repository details live on Overview. Opening a board shows its phase graph; clicking a phase title opens a Kanban scoped to that phase, with a back button. Completed phases are hidden from the graph by default. Agents can describe, complete, and advance phases, assign work to phases, and cancel obsolete cards through CLI commands. Final packaging remains to be built.
+The current UI starts with projects. Selecting one shows Overview, then separate Stakeholders and Boards sections in the sidebar. Each stakeholder row shows their pending question count. Repository details live on Overview. Opening a board shows its phase graph; clicking a phase title opens a Kanban scoped to that phase, with a back button. Completed phases are hidden from the graph by default. Agents can describe, complete, and advance phases, assign work to phases, and cancel obsolete cards through CLI commands. See [docs/PACKAGING.md](docs/PACKAGING.md) for building the app bundle and installing the Claude plugin.
 
 Claimed In Progress tasks can have an attached agent session. The CLI can pause it for a question, read a change briefing, acknowledge delivered events, and resume it. `workyard next` queries paused, actionable sessions before new Backlog work; there is no stored queue. Agent transport and worker execution still belong to an external orchestrator.
 
@@ -44,3 +44,14 @@ yarn tauri dev             # desktop app, after Rust dependencies are installed
 ```
 
 Use `workyard --db /path/to/test.db` or `WORKYARD_DB` to select a database. The CLI also accepts `--actor` and `--json`.
+
+## Packaging
+
+```sh
+scripts/stage-sidecar.sh            # build the CLI and stage it as the app's sidecar (once per clone)
+cd app && npx tauri build           # Workyard.app and a dmg
+claude plugin marketplace add .     # install the Claude plugin from this repo
+claude plugin install workyard@workyard
+```
+
+Details, signing and the desktop-side code changes are in [docs/PACKAGING.md](docs/PACKAGING.md).
