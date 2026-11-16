@@ -19,6 +19,7 @@ import { StakeholderView } from "@/components/workspace/stakeholder-view";
 import { CardDetail } from "@/components/workspace/card-detail";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { loadViewState, restoreTarget, saveViewState } from "@/lib/view-state";
 
 function errorMessage(error: unknown): string {
   if (typeof error === "string") {
@@ -49,6 +50,8 @@ export default function App() {
   const [orchestrator, setOrchestrator] = useState<Orchestrator | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // The database path keys what is remembered; empty until the first read finishes.
+  const [scope, setScope] = useState("");
   const cursor = useRef(0);
   const boardRef = useRef<Board | null>(null);
   boardRef.current = board;
@@ -78,7 +81,22 @@ export default function App() {
     void (async () => {
       try {
         cursor.current = await client.latestEventId();
+        const path = await client.dbPath().catch(() => "");
         await refresh(null);
+        if (path && active) {
+          const saved = loadViewState(path);
+          const [knownProjects, knownBoards] = await Promise.all([client.listProjects(), client.listBoards()]);
+          const target = restoreTarget(saved, knownProjects.map((item) => item.id), knownBoards, unassignedId);
+          if (active) {
+            setProjectId(target.projectId);
+            setBoardKey(target.boardKey);
+            if (target.boardKey) {
+              setSection(saved.section ?? "dependencies");
+              setPhaseId(saved.phaseId ?? null);
+            }
+            setScope(path);
+          }
+        }
       } catch (e) {
         if (active) setError(errorMessage(e));
       } finally {
@@ -89,6 +107,11 @@ export default function App() {
       active = false;
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (!scope || loading) return;
+    saveViewState(scope, { projectId, boardKey, section, phaseId });
+  }, [scope, loading, projectId, boardKey, section, phaseId]);
 
   useEffect(() => {
     setOrchestrator(null);
@@ -323,6 +346,7 @@ export default function App() {
               stakeholders={project && project.id===board.project_id ? project.stakeholders : []}
               view={section}
               phaseId={phaseId}
+              scope={scope}
               cues={cues}
               orchestrator={orchestrator}
               onOrchestratorState={(state) => mutate(() => client.setOrchestratorState(board.key, state))}

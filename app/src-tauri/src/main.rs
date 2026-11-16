@@ -36,6 +36,10 @@ fn add_card_note(card: String, body: String) -> Result<Value, String> {
     wrap(store()?.add_card_note("ui", &card, &body))
 }
 #[tauri::command]
+fn db_path() -> Result<String, String> {
+    Ok(store()?.path().to_string_lossy().into_owned())
+}
+#[tauri::command]
 fn latest_event_id() -> Result<i64, String> {
     store()?.latest_event_id().map_err(|e| e.to_string())
 }
@@ -502,6 +506,7 @@ fn main() {
             view_board,
             view_card,
             add_card_note,
+            db_path,
             latest_event_id,
             poll_events,
             list_questions,
