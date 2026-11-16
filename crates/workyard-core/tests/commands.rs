@@ -1889,3 +1889,19 @@ fn a_session_waiting_for_review_resumes_only_once_the_commit_is_approved() {
     assert_eq!(store.next_ready_task(&board, None).unwrap()["dispatch_action"], "resume");
     // Waiting for a question and for review at once is allowed; see the integration tests.
 }
+
+#[test]
+fn schema_too_new_names_both_versions_and_says_what_to_do() {
+    let (dir, store, _) = setup();
+    let db = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    db.pragma_update(None, "user_version", 999).unwrap();
+    drop(db);
+    let err = store.list_boards().unwrap_err();
+    assert_eq!(err.code, "schema_too_new");
+    assert!(err.message.contains("version 999"), "{}", err.message);
+    assert!(err.message.contains("binary is older"), "{}", err.message);
+    assert!(err.hint.as_deref().unwrap().contains("Rebuild or reinstall"));
+    let details = err.details.unwrap();
+    assert_eq!(details["database_schema_version"], 999);
+    assert!(details["binary_schema_version"].as_i64().unwrap() < 999);
+}

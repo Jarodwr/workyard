@@ -44,6 +44,17 @@ Status: project context, code links, review approval, and start/finish dependenc
 - **Assigned contact** and **actual respondent** are separate facts. Assigning a contact must not imply that a message was sent. Record delivery/notification only when an integrated orchestrator confirms it.
 - Engineering and business questions use the same answer card in the stakeholder view; only their colors differ. Answered questions are omitted from the phase graph; open questions can be assigned to a stakeholder and answered from that graph. Unassigned questions remain discoverable on their board's phase graph.
 
+## Planning cards that do not overlap
+
+Cards run in parallel, so a plan must keep them apart. In the todo sample two cards overlapped: one built what the other was meant to. The planner guidance (`plugin/skills/workyard-planner/SKILL.md`) therefore asks planners to:
+
+- give every card a distinct set of files or behaviour, and check no other card covers it;
+- state in the description which files the card owns (and which it must not touch);
+- sequence cards that must touch the same file with a dependency (`--scope finish` if only merge order matters) instead of running them in parallel;
+- say what done means: the behaviour, the tests that must pass, the docs that change.
+
+Bad: C-1 "Add export command" and C-2 "Export to CSV" both edit `export.rs` with no dependency. Good: C-1 owns `export.rs` and is done when `workyard export --json` prints the board; C-2 depends on C-1, owns `export/csv.rs`, and is done when `cargo test export_csv` passes.
+
 ## Commands to design with the implementation
 
 Implemented named commands cover creating projects, linking boards, registering the local repository, adding document references and stakeholders, optionally assigning or unassigning a stakeholder on a question, linking/updating code changes, adding or removing review requirements after the fact, recording approval, and adding start/finish dependencies. Project editing, some removal commands, and automated Git observation remain future work. Card ownership, optimistic versions, and one event per write still apply. Do not expose arbitrary SQL or unrestricted file access through MCP.
