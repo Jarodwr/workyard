@@ -2055,3 +2055,19 @@ fn card_report_is_stored_replaced_and_limited() {
     assert_eq!(store.set_card_report("agent:one", key, &huge).unwrap_err().code, "validation_error");
     assert!(store.set_card_report("agent:one", key, &"x".repeat(256 * 1024)).is_ok());
 }
+
+#[test]
+fn pool_defaults_to_three_until_chosen_and_explicit_choices_stick() {
+    let (_dir, store, board) = setup();
+    // Before any orchestrator has run, status shows the default.
+    assert_eq!(store.orchestrator_status(&board).unwrap()["pool_size"], 3);
+    // Acquiring without a pool keeps the default.
+    let lease = store.orchestrator_acquire(&board, "run-1", "h", None, 30, None).unwrap();
+    assert_eq!(lease["pool_size"], 3);
+    // An explicit choice, even 1, is kept across a takeover without a pool.
+    let actor = lease["actor"].as_str().unwrap().to_owned();
+    store.orchestrator_set_pool(&actor, &board, 1).unwrap();
+    expire_lease(&store, &board);
+    let again = store.orchestrator_acquire(&board, "run-2", "h", None, 30, None).unwrap();
+    assert_eq!(again["pool_size"], 1);
+}

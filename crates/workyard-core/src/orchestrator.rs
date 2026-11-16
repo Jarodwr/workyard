@@ -56,10 +56,15 @@ pub(crate) fn check_epoch_for(db: &Connection, actor: &str, board_id: &str) -> R
     check_epoch(db, board_id, epoch_of(actor)?)
 }
 
+/// Workers a board runs at once until someone chooses a pool size. Three keeps independent
+/// cards moving without flooding the machine or the merge queue; `orch run --pool` and
+/// `orch pool` replace it and the choice is kept on the board.
+pub const DEFAULT_POOL_SIZE: i64 = 3;
+
 fn ensure_row(db: &Connection, board_id: &str) -> Result<()> {
     db.execute(
-        "INSERT OR IGNORE INTO orchestrator_sessions(board_id,updated_at) VALUES (?1,?2)",
-        params![board_id, now()],
+        "INSERT OR IGNORE INTO orchestrator_sessions(board_id,pool_size,updated_at) VALUES (?1,?2,?3)",
+        params![board_id, DEFAULT_POOL_SIZE, now()],
     )?;
     Ok(())
 }
@@ -167,7 +172,7 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
         )
         .optional()?
         .unwrap_or_else(|| {
-            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"binary_version":null,"schema_version":null,"backoff_until":null,"backoff_reason":"","permissions":"full","worker_env_keys":[]})
+            json!({"desired_state":"running","cursor":0,"pool_size":DEFAULT_POOL_SIZE,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"binary_version":null,"schema_version":null,"backoff_until":null,"backoff_reason":"","permissions":"full","worker_env_keys":[]})
         });
     let mut row = row;
     let epoch = row["epoch"].as_i64().unwrap_or(0);

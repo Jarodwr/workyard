@@ -374,7 +374,7 @@ enum OrchCommand {
     /// a board; a second fails with orchestrator_conflict.
     Run {
         board: String,
-        /// Maximum concurrent workers (kept on the board across restarts)
+        /// Maximum concurrent workers, kept on the board across restarts (default 3 until you choose)
         #[arg(long)]
         pool: Option<i64>,
         /// Claude Code binary used to run workers headless
@@ -435,7 +435,7 @@ enum OrchCommand {
     Resume { board: String },
     /// Dispatch nothing new and let running workers finish.
     Drain { board: String },
-    /// Set how many workers may run at once.
+    /// Set how many workers may run at once (a board starts at 3).
     Pool { board: String, size: i64 },
     /// Stop dispatching until a time (use the orchestrator actor); omit --until to clear.
     Backoff {
