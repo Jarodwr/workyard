@@ -76,6 +76,21 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// The directory holding the `workyard` CLI the desktop ships with (next to this executable),
+/// or None when there is none, in which case the terminal's own PATH is used.
+fn bundled_bin_dir(exe: &std::path::Path) -> Option<String> {
+    let dir = exe.parent()?;
+    dir.join("workyard").exists().then(|| dir.to_string_lossy().into_owned())
+}
+
+/// Shell lines that export WORKYARD_BIN for a terminal script, so the plugin hook finds the CLI.
+fn bin_export_line(exe: Option<&std::path::Path>) -> String {
+    match exe.and_then(bundled_bin_dir) {
+        Some(dir) => format!("export WORKYARD_BIN={}\n", shell_quote(&dir)),
+        None => "export WORKYARD_BIN=\"$(dirname \"$(command -v workyard)\" 2>/dev/null)\"\n".into(),
+    }
+}
+
 /// The project repository for a board: where a worker's worktree lives.
 fn repository_for_board(store: &Store, board_id: &str) -> Option<String> {
     let boards = store.list_boards().ok()?;
@@ -114,9 +129,10 @@ fn open_in_terminal(card: String) -> Result<Value, String> {
     let worktree_dir = std::path::Path::new(&repo).join(".workyard/worktrees").join(&key);
     let repo = if detail["workspace"] != "none" && worktree_dir.is_dir() { worktree_dir.to_string_lossy().into_owned() } else { repo };
     let script = format!(
-        "#!/bin/zsh\ncd {repo} || exit 1\nexport WORKYARD_DB={db}\nexport WORKYARD_ACTOR={actor}\n\
+        "#!/bin/zsh\ncd {repo} || exit 1\nexport WORKYARD_DB={db}\nexport WORKYARD_ACTOR={actor}\n{bin}\
 echo 'Workyard: you are driving {key}. Exit Claude when done, then choose Release hold in Workyard.'\n\
 claude --resume {session}\n",
+        bin = bin_export_line(std::env::current_exe().ok().as_deref()),
         repo = shell_quote(&repo),
         db = shell_quote(&store.path().to_string_lossy()),
         actor = shell_quote(detail["owner_actor"].as_str().unwrap_or("human")),
@@ -139,7 +155,7 @@ claude --resume {session}\n",
 /// GUI app does not inherit, so `claude` can be found. One orchestrator per board still holds:
 /// a second start fails inside `orch run` and its reason is returned here.
 #[tauri::command]
-fn start_orchestrator(board: String) -> Result<Value, String> {
+fn start_orchestrator(board: String, supervisor: Option<bool>) -> Result<Value, String> {
     use std::io::{Read, Seek, SeekFrom};
     let store = store()?;
     let view = store.view_board(&board).map_err(|e| e.to_string())?;
@@ -171,6 +187,9 @@ fn start_orchestrator(board: String) -> Result<Value, String> {
         .stderr(log);
     if let Some(repo) = &repo {
         command.args(["--cwd", repo]);
+    }
+    if supervisor == Some(true) {
+        command.arg("--supervisor");
     }
     #[cfg(unix)]
     {
@@ -248,9 +267,10 @@ and its project with `workyard --json projects`, summarise what is there in a fe
 Do not claim or start any card."
     );
     let script = format!(
-        "#!/bin/zsh\ncd {repo} || exit 1\nexport WORKYARD_DB={db}\nexport WORKYARD_ACTOR={actor}\n\
+        "#!/bin/zsh\ncd {repo} || exit 1\nexport WORKYARD_DB={db}\nexport WORKYARD_ACTOR={actor}\n{bin}\
 echo 'Workyard planner for {key}. Cards are not started from here; run the orchestrator for that.'\n\
 claude --append-system-prompt \"$(cat {system})\" {first}\n",
+        bin = bin_export_line(std::env::current_exe().ok().as_deref()),
         repo = shell_quote(&repo),
         db = shell_quote(&store.path().to_string_lossy()),
         actor = shell_quote(&format!("agent:planner-{}", key.to_lowercase())),
@@ -499,6 +519,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bin_export_uses_the_bundled_dir_or_falls_back_to_path() {
+        let dir = std::env::temp_dir().join(format!("workyard-bin-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("app");
+        assert!(bin_export_line(Some(&exe)).contains("command -v workyard"));
+        std::fs::write(dir.join("workyard"), "").unwrap();
+        assert_eq!(bin_export_line(Some(&exe)), format!("export WORKYARD_BIN={}\n", shell_quote(&dir.to_string_lossy())));
+        assert!(bin_export_line(None).contains("command -v workyard"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn tool_calls_results_and_errors_become_rows() {
