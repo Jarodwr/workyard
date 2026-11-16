@@ -42,6 +42,14 @@ unsigned_note='  caveats <<~EOS
     macOS blocks it on first launch. Allow it once with
       xattr -dr com.apple.quarantine /Applications/Workyard.app
     or right-click the app and choose Open.
+
+    The app carries its own copy of the workyard CLI, so it works on its own.
+    To use `workyard` in a terminal, install the formula too:
+      brew install workyard
+
+    To use the Claude Code plugin that ships inside the app:
+      claude plugin marketplace add /Applications/Workyard.app/Contents/Resources/marketplace
+      claude plugin install workyard@workyard
   EOS'
 
 out=dist/tap

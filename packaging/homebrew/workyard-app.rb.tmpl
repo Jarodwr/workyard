@@ -11,8 +11,8 @@ cask "workyard" do
   depends_on macos: :ventura
 
   app "Workyard.app"
-  # The app bundles the same CLI as the `workyard` formula; use one or the other.
-  binary "#{appdir}/Workyard.app/Contents/MacOS/workyard"
+  # No `binary` stanza: the app carries its own CLI for its orchestrator, and linking another
+  # `workyard` into the prefix would clash with the `workyard` formula.
 
   zap trash: [
     "~/Library/Application Support/dev.workyard.app",

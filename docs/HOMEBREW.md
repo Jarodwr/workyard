@@ -5,7 +5,7 @@ Everything for `Jarodwr/homebrew-tap` is generated from `packaging/homebrew/`. N
 | Template | Becomes | Purpose |
 |---|---|---|
 | `packaging/homebrew/workyard.rb.tmpl` | `Formula/workyard.rb` | Builds the CLI from the GitHub source archive, installs the plugin to `share/workyard/plugin`, `head`, caveats, `test do` |
-| `packaging/homebrew/workyard-app.rb.tmpl` | `Casks/workyard.rb` | Installs `Workyard.app` from the dmg and links the bundled CLI |
+| `packaging/homebrew/workyard-app.rb.tmpl` | `Casks/workyard.rb` | Installs `Workyard.app` from the dmg (no `binary` link: the CLI comes from the `workyard` formula, so the two do not clash) |
 | `packaging/homebrew/workyard.md.tmpl` | `docs/workyard.md` | The doc page the tap keeps per formula |
 
 Source and homepage are `https://github.com/Jarodwr/workyard`, licence MIT (board decisions). The repository has no `LICENSE` file yet: add one before the first release, so the tarball and the GitHub archive carry it.
