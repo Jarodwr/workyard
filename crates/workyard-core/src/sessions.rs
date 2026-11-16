@@ -19,7 +19,7 @@ pub(crate) fn active_session(db: &Connection, card_id: &str) -> Result<Option<Va
 
 fn session_row(db: &Connection, id: &str) -> Result<Value> {
     Ok(db.query_row(
-        "SELECT s.id,s.card_id,s.owner_actor,s.runner,s.external_session_id,s.attached_at,s.paused_at,s.waiting_question_id,q.key,s.last_delivered_event_id,s.detached_at,s.held_by FROM task_sessions s LEFT JOIN questions q ON q.id=s.waiting_question_id WHERE s.id=?1",
+        "SELECT s.id,s.card_id,s.owner_actor,s.runner,s.external_session_id,s.attached_at,s.paused_at,s.waiting_question_id,q.key,s.last_delivered_event_id,s.detached_at,s.held_by,s.waiting_review FROM task_sessions s LEFT JOIN questions q ON q.id=s.waiting_question_id WHERE s.id=?1",
         [id],
         |row| Ok(json!({
             "id":row.get::<_,String>(0)?, "card_id":row.get::<_,String>(1)?,
@@ -29,6 +29,7 @@ fn session_row(db: &Connection, id: &str) -> Result<Value> {
             "waiting_question_key":row.get::<_,Option<String>>(8)?,
             "last_delivered_event_id":row.get::<_,i64>(9)?, "detached_at":row.get::<_,Option<String>>(10)?,
             "held_by":row.get::<_,Option<String>>(11)?,
+            "waiting_review":row.get::<_,i64>(12)? != 0,
         })),
     )?)
 }
@@ -83,6 +84,9 @@ pub(crate) fn resume_eligible(db: &Connection, card: &Value, session: &Value) ->
             |row| row.get(0),
         )?;
         Ok(status != "open")
+    } else if session["waiting_review"] == true {
+        // Waiting for review: not before the card can actually finish.
+        Ok(card["ready"] == true && card["can_finish"] == true)
     } else {
         Ok(card["ready"] == true)
     }
@@ -158,6 +162,22 @@ impl Store {
         card: &str,
         waiting_question: Option<&str>,
     ) -> Result<Value> {
+        self.pause_task_session_for(actor, card, waiting_question, false)
+    }
+
+    /// Pause a session. With `waiting_review` it is not offered for resume until the card can
+    /// finish (review approved, finish dependencies met); with a question, until that question
+    /// is resolved. A plain pause is eligible as soon as the card is unblocked.
+    pub fn pause_task_session_for(
+        &self,
+        actor: &str,
+        card: &str,
+        waiting_question: Option<&str>,
+        waiting_review: bool,
+    ) -> Result<Value> {
+        if waiting_review && waiting_question.is_some() {
+            return Err(Error::new("validation_error", "wait for a question or for review, not both"));
+        }
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let card_id = resolve_card(&tx, card)?;
@@ -187,8 +207,8 @@ impl Store {
             }
         }
         tx.execute(
-            "UPDATE task_sessions SET paused_at=?2,waiting_question_id=?3 WHERE id=?1",
-            params![before["id"].as_str().unwrap(), now(), question_id],
+            "UPDATE task_sessions SET paused_at=?2,waiting_question_id=?3,waiting_review=?4 WHERE id=?1",
+            params![before["id"].as_str().unwrap(), now(), question_id, waiting_review],
         )?;
         let after = session_row(&tx, before["id"].as_str().unwrap())?;
         record(
@@ -294,7 +314,7 @@ impl Store {
             ));
         }
         tx.execute(
-            "UPDATE task_sessions SET paused_at=NULL,waiting_question_id=NULL WHERE id=?1",
+            "UPDATE task_sessions SET paused_at=NULL,waiting_question_id=NULL,waiting_review=0 WHERE id=?1",
             [before["id"].as_str().unwrap()],
         )?;
         let after = session_row(&tx, before["id"].as_str().unwrap())?;

@@ -337,7 +337,7 @@ fn v7_database_gets_phases_and_preserves_existing_work() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
 }
 
@@ -799,7 +799,7 @@ fn existing_v1_database_migrates_to_agent_types_and_notes() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
 }
 
 #[test]
@@ -1852,4 +1852,42 @@ fn a_held_session_is_never_offered_for_resume_until_released() {
     assert!(released["held_by"].is_null() && released["paused_at"].is_string());
     assert_eq!(store.next_ready_task(&board, None).unwrap()["dispatch_action"], "resume");
     store.resume_task_session("orch", key).unwrap();
+}
+
+#[test]
+fn a_session_waiting_for_review_resumes_only_once_the_commit_is_approved() {
+    let (_dir, store, board) = setup();
+    let project = store.create_project("agent", "Code", "").unwrap();
+    let project_id = project["id"].as_str().unwrap();
+    store.attach_board_to_project("agent", &board, project_id, 1).unwrap();
+    let repo = store.add_project_repository("agent", project_id, "/tmp/code", "main", None).unwrap();
+    let card = store.create_card("agent", &board, "Feature", "", "P2", None).unwrap();
+    let key = card["key"].as_str().unwrap();
+    store.claim_card("worker", key, 1).unwrap();
+    store.move_card("worker", key, "In Progress", None, None::<i64>).unwrap();
+    store.attach_task_session("worker", key, "claude", "sess").unwrap();
+    let version = store.view_card(key).unwrap()["version"].as_i64().unwrap();
+    let change = store
+        .link_card_change("worker", key, repo["id"].as_str().unwrap(), "worktree-c-1", None, "abc123", true, version)
+        .unwrap();
+
+    // Both pauses are plain pauses to the worker, but only the review one waits for approval.
+    assert_eq!(
+        store.pause_task_session_for("worker", key, None, true).unwrap()["waiting_review"],
+        true
+    );
+    assert!(store.next_ready_task(&board, None).unwrap().is_null(), "resumed before approval");
+    assert_eq!(store.resume_task_session("orch", key).unwrap_err().code, "session_not_ready");
+
+    store.approve_card_change("human", change["id"].as_str().unwrap(), "Alex", change["version"].as_i64().unwrap()).unwrap();
+    let next = store.next_ready_task(&board, None).unwrap();
+    assert_eq!(next["dispatch_action"], "resume");
+    assert_eq!(store.resume_task_session("orch", key).unwrap()["waiting_review"], false);
+
+    // A plain pause is unchanged: eligible straight away.
+    store.pause_task_session("worker", key, None).unwrap();
+    assert_eq!(store.next_ready_task(&board, None).unwrap()["dispatch_action"], "resume");
+    // Waiting for a question and for review at once is rejected.
+    store.resume_task_session("orch", key).unwrap();
+    assert_eq!(store.pause_task_session_for("worker", key, Some("Q-1"), true).unwrap_err().code, "validation_error");
 }

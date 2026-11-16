@@ -495,6 +495,9 @@ enum SessionCommand {
         card: String,
         #[arg(long)]
         waiting_question: Option<String>,
+        /// Wait until a human approves your commit (and any finish dependency is met)
+        #[arg(long)]
+        for_review: bool,
     },
     Resume { card: String },
     /// Take the session over (for example in a terminal). It stays paused and is never offered
@@ -847,7 +850,7 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
         } => store.release_card(actor, &card, expected_version, Some(&reason))?,
         OrchCommand::Session { command } => match command {
             SessionCommand::Attach { card, runner, session_id } => store.attach_task_session(actor, &card, &runner, &session_id)?,
-            SessionCommand::Pause { card, waiting_question } => store.pause_task_session(actor, &card, waiting_question.as_deref())?,
+            SessionCommand::Pause { card, waiting_question, for_review } => store.pause_task_session_for(actor, &card, waiting_question.as_deref(), for_review)?,
             SessionCommand::Resume { card } => store.resume_task_session(actor, &card)?,
             SessionCommand::Hold { card, by } => store.hold_task_session(actor, &card, &by)?,
             SessionCommand::ReleaseHold { card } => store.release_task_session_hold(actor, &card)?,

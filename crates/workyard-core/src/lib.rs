@@ -1654,10 +1654,10 @@ impl Store {
 
 fn migrate(db: &mut Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 13 {
+    if version == 14 {
         return Ok(());
     }
-    if version > 13 {
+    if version > 14 {
         return Err(Error::new(
             "schema_too_new",
             "database was created by a newer Workyard version",
@@ -1801,6 +1801,15 @@ fn migrate(db: &mut Connection) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 13")?;
+        version = 13;
+    }
+    if version == 13 {
+        tx.execute_batch(include_str!("../migrations/014.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (14,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 14")?;
     }
     tx.commit()?;
     Ok(())

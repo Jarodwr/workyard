@@ -511,8 +511,9 @@ fn claim_prompt(board: &str, key: &str, actor: &str, workspace: Workspace) -> St
             "You work in your own git worktree on its own branch (see `git branch --show-current`); never touch another checkout. \
 Commit your work there. Once you have commits, record them with `workyard task link-change {key} <repository-id> <your-branch> --review-required` \
 (find the repository id with `workyard --json projects` then `workyard --json project <id>`), and run \
-`workyard task update-change <change> <commit>` after each further commit. A human approves the commit in the desktop app; \
-you cannot move the card to Done until they do."
+`workyard task update-change <change> <commit>` after each further commit. A human reviews, merges, and approves the commit in the desktop app. \
+When your work is committed and recorded, run `workyard orch session pause {key} --for-review` and stop: you will be resumed once it is approved, \
+and then you finish with `workyard task move {key} Done`."
         ),
         Workspace::None => format!(
             "This card is investigative: do not modify any repository. Report what you find with `workyard task note {key} \"...\"` \
@@ -541,7 +542,8 @@ fn resume_prompt(key: &str, pages: &[Value]) -> String {
         "Resume Workyard card {key}. You paused it earlier; it is In Progress and claimed by you again. \
 Re-read it with `workyard --json card {key}`. These board events happened since you last saw it, \
 including any answer to your question:\n{}\n\
-Continue the work. Finish with `workyard task move {key} Done`, or pause again if you must wait.",
+Continue the work. If you were waiting for review and it is approved, finish with `workyard task move {key} Done`. \
+If you must wait again, pause (`workyard orch session pause {key} --for-review` or `--waiting-question <Q-key>`) and stop.",
         serde_json::to_string(&events).unwrap_or_default()
     )
 }
