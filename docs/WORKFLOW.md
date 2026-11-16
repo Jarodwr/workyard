@@ -38,6 +38,7 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 | You want to | Do this |
 |---|---|
 | Answer a question | Open it in the phase graph or the stakeholder view and pick an option. The worker resumes with your answer. |
+| Discuss a question | Open **Discuss** under the options (or `workyard question discuss Q-3 "..."`), and write to the worker. It resumes only to reply in the thread (and may revise the options or its recommendation), then waits again on the same question. A badge marks questions with a new reply. The question stays open until you answer or drop it. |
 | Approve code | Card → Code changes → **Approve this commit**. A card with a review gate cannot reach Done without it. Review is off by default; `workyard plan board-review <board> on` turns it on for new changes. |
 | Choose merge or rebase | Board settings → **Integration**, or `workyard plan board-integration <board> merge\|rebase`. `merge` (default) has workers merge the target into their branch, leaving a merge commit per card; `rebase` has them rebase onto the target and fast-forward, so history stays linear. Either way the Done gate is the same: the branch tip must be on the target. |
 | Tell a worker something | Add a note on its card. It reaches the running worker within moments (at its next tool step), or its next briefing if it is paused. |
@@ -51,7 +52,7 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 
 ## Questions and side discoveries
 
-Workers are told to ask, not guess. When a card leaves a real choice open (scope, user-visible behaviour or naming, a trade-off, anything the card's author would want to weigh in on) the worker raises a question with 2-4 options, a recommendation and a one-line reason, then pauses until you answer. Expect many questions; answer them in the phase graph or the stakeholder view. Workers do not ask about mechanical blockers (a refused command, a merge conflict, a failing test); they fix those.
+Workers are told to ask, not guess. When a card leaves a real choice open (scope, user-visible behaviour or naming, a trade-off, anything the card's author would want to weigh in on) the worker raises a question with 2-4 options, a recommendation and a one-line reason, then pauses until you answer. Expect many questions; answer them in the phase graph or the stakeholder view. If an option is not enough, talk to the worker in the question's thread before answering (see the table above); only you resolve a question. Workers do not ask about mechanical blockers (a refused command, a merge conflict, a failing test); they fix those.
 
 When a worker finds a bug, missing piece or follow-up outside its card, it adds a Backlog card (`task add-card`, with what, where and why), orders it with `task depend` if needed, and links it from its own card's note. It adds at most 3 per card and never starts them, so review the Backlog after a run.
 
