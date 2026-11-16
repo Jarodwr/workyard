@@ -1,0 +1,24 @@
+[tools]
+rust = "1.99.1"
+node = "24.21.0"
+yarn = "3.6.1"
+
+[tasks.install]
+description = "Install frontend dependencies"
+run = "cd app && mise exec yarn@3.6.1 -- yarn install"
+
+[tasks.check]
+description = "Check the Rust workspace and build the frontend"
+run = ["cargo check --workspace", "cd app && mise exec yarn@3.6.1 -- yarn build"]
+
+[tasks.test]
+description = "Run Rust tests"
+run = "cargo test --workspace"
+
+[tasks.dev]
+description = "Run the Tauri desktop app"
+run = "cd app && mise exec yarn@3.6.1 -- yarn tauri dev"
+
+[tasks.build]
+description = "Build the Tauri desktop app"
+run = "cd app && mise exec yarn@3.6.1 -- yarn tauri build"

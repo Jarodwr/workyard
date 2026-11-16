@@ -1,0 +1,1 @@
+ALTER TABLE cards ADD COLUMN agent_type TEXT NOT NULL DEFAULT '';

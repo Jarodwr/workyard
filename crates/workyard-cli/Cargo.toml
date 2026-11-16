@@ -1,0 +1,14 @@
+[package]
+name = "workyard-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "workyard"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+workyard-core = { path = "../workyard-core" }
