@@ -111,7 +111,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -146,7 +146,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -186,7 +186,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -249,7 +249,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -280,7 +280,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -357,7 +357,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -424,7 +424,7 @@ impl Store {
             &effects,
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(change)
     }
 
@@ -473,7 +473,7 @@ impl Store {
             &effects,
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -519,7 +519,7 @@ impl Store {
             &effects,
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -577,7 +577,7 @@ impl Store {
             &effects,
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 }

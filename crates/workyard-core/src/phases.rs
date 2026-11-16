@@ -214,7 +214,7 @@ impl Store {
             ],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -231,7 +231,7 @@ impl Store {
         tx.execute("UPDATE boards SET version=version+1 WHERE id=?1", [&board_id])?;
         let after = phase_row(&tx, &phase_id)?;
         record(&tx,actor,"phase_described",&board_id,"phase",&phase_id,Some(&before),Some(&after),&[],"")?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -250,7 +250,7 @@ impl Store {
         tx.execute("UPDATE boards SET version=version+1 WHERE id=?1",[&board_id])?;
         let after=phase_row(&tx,&phase_id)?;
         record(&tx,actor,"phase_completed",&board_id,"phase",&phase_id,Some(&before),Some(&after),&[json!({"type":"phase_archived","phase_id":phase_id})],"")?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -288,7 +288,7 @@ impl Store {
             &[json!({"type":"phase_archived","phase_id":current_id}),json!({"type":"phase_current_changed","from":current_id,"to":next_id})],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -409,7 +409,7 @@ impl Store {
             &[],
             &format!("from phase {old_position} to {new_position}"),
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -464,7 +464,7 @@ impl Store {
             &effects,
             reason.trim(),
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 }

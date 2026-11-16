@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+mod orchestrator;
+pub use orchestrator::DEFAULT_LEASE_SECONDS;
 mod phases;
 mod projects;
 mod sessions;
@@ -120,6 +122,23 @@ impl Store {
         &self.path
     }
 
+    /// File whose contents and mtime change after every committed write. Other processes
+    /// (the desktop, `events --follow`) wait on it instead of polling the database.
+    pub fn tick_path(&self) -> PathBuf {
+        let mut path = self.path.clone().into_os_string();
+        path.push(".tick");
+        PathBuf::from(path)
+    }
+
+    /// Commit, then publish the latest event ID. The event log stays the source of truth;
+    /// a missed or failed tick only delays a watcher until its fallback poll.
+    pub(crate) fn commit(&self, tx: Transaction) -> Result<()> {
+        let latest: i64 = tx.query_row("SELECT COALESCE(MAX(id),0) FROM events", [], |r| r.get(0))?;
+        tx.commit()?;
+        let _ = fs::write(self.tick_path(), latest.to_string());
+        Ok(())
+    }
+
     pub fn open(&self) -> Result<Connection> {
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
@@ -181,7 +200,7 @@ impl Store {
             &lane_effects,
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -254,7 +273,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -318,7 +337,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -499,7 +518,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(note)
     }
 
@@ -600,7 +619,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -644,14 +663,20 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
     pub fn claim_card(&self, actor: &str, card: &str, expected: i64) -> Result<Value> {
-        require_nonblank("actor", actor)?;
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let after = Self::claim_card_tx(&tx, actor, card, expected)?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
+    pub(crate) fn claim_card_tx(tx: &Transaction, actor: &str, card: &str, expected: i64) -> Result<Value> {
+        require_nonblank("actor", actor)?;
         let id = resolve_card(&tx, card)?;
         let before = card_row(&tx, &id)?;
         check_version(&before, expected)?;
@@ -698,7 +723,6 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
         Ok(after)
     }
 
@@ -767,7 +791,7 @@ impl Store {
             &[],
             force_reason.unwrap_or(""),
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -821,7 +845,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -836,6 +860,12 @@ impl Store {
         let expected: Option<i64> = expected.into();
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let after = Self::move_card_tx(&tx, actor, card, destination, position, expected)?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
+    pub(crate) fn move_card_tx(tx: &Transaction, actor: &str, card: &str, destination: &str, position: Option<i64>, expected: Option<i64>) -> Result<Value> {
         let id = resolve_card(&tx, card)?;
         let before = guard_card(&tx, &id, actor, expected)?;
         let board_id = before["board_id"].as_str().unwrap();
@@ -925,7 +955,6 @@ impl Store {
             &effects,
             "",
         )?;
-        tx.commit()?;
         Ok(after)
     }
 
@@ -959,7 +988,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -1076,7 +1105,7 @@ impl Store {
             &effects,
             &target_key,
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(json!({"dependency_id":dep_id,"card":after}))
     }
 
@@ -1122,7 +1151,7 @@ impl Store {
             &effects,
             target,
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -1182,7 +1211,7 @@ impl Store {
             &effects,
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -1306,7 +1335,7 @@ impl Store {
             &effects,
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -1352,7 +1381,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -1420,7 +1449,7 @@ impl Store {
             &effects,
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -1472,6 +1501,15 @@ impl Store {
     pub fn next_ready_task(&self, board: &str, agent_type: Option<&str>) -> Result<Value> {
         let db = self.open()?;
         let board_id = resolve_board(&db, board)?;
+        Self::next_ready_task_on(&db, &board_id, agent_type)
+    }
+
+    pub(crate) fn next_ready_task_on(
+        db: &Connection,
+        board_id: &str,
+        agent_type: Option<&str>,
+    ) -> Result<Value> {
+        let board_id = board_id.to_owned();
         let (current_id, current_position) = phases::current_phase(&db, &board_id)?;
         let mut paused = db.prepare("SELECT c.id FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id JOIN task_sessions s ON s.card_id=c.id AND s.detached_at IS NULL WHERE c.board_id=?1 AND p.position BETWEEN ?2 AND ?2+1 AND l.kind='active' AND c.cancelled_at IS NULL AND c.owner_actor=s.owner_actor AND s.paused_at IS NOT NULL AND (?3 IS NULL OR c.agent_type=?3) ORDER BY p.position,c.position,c.key")?;
         let paused_ids = paused.query_map(params![board_id,current_position,agent_type], |row| row.get::<_,String>(0))?;
@@ -1581,10 +1619,10 @@ impl Store {
 
 fn migrate(db: &mut Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 10 {
+    if version == 11 {
         return Ok(());
     }
-    if version > 10 {
+    if version > 11 {
         return Err(Error::new(
             "schema_too_new",
             "database was created by a newer Workyard version",
@@ -1701,6 +1739,15 @@ fn migrate(db: &mut Connection) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 10")?;
+        version = 10;
+    }
+    if version == 10 {
+        tx.execute_batch(include_str!("../migrations/011.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (11,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 11")?;
     }
     tx.commit()?;
     Ok(())
@@ -1974,6 +2021,9 @@ fn record(
     note: &str,
 ) -> Result<()> {
     require_nonblank("actor", actor)?;
+    if let (Some(epoch), false) = (orchestrator::actor_epoch(actor), board_id.is_empty()) {
+        orchestrator::check_epoch(db, board_id, epoch)?;
+    }
     db.execute("INSERT INTO events(ts,actor,type,board_id,entity_type,entity_id,before_json,after_json,effects_json,note) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![now(),actor,kind,if board_id.is_empty() {None} else {Some(board_id)},entity_type,entity_id,before.map(serde_json::to_string).transpose()?,after.map(serde_json::to_string).transpose()?,serde_json::to_string(effects)?,note])?;
     Ok(())
 }

@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 
 use super::{
@@ -99,11 +99,17 @@ impl Store {
         runner: &str,
         external_session_id: &str,
     ) -> Result<Value> {
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let after = Self::attach_task_session_tx(&tx, actor, card, runner, external_session_id)?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
+    pub(crate) fn attach_task_session_tx(tx: &Transaction, actor: &str, card: &str, runner: &str, external_session_id: &str) -> Result<Value> {
         require_nonblank("actor", actor)?;
         require_nonblank("runner", runner)?;
         require_nonblank("session ID", external_session_id)?;
-        let mut db = self.open()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let card_id = resolve_card(&tx, card)?;
         let card = claimed_active_card(&tx, &card_id)?;
         if active_session(&tx, &card_id)?.is_some() {
@@ -141,7 +147,6 @@ impl Store {
             &[json!({"type":"task_session_attached","card_id":card_id})],
             "",
         )?;
-        tx.commit()?;
         Ok(after)
     }
 
@@ -196,7 +201,7 @@ impl Store {
             &[json!({"type":"task_session_paused","card_id":card_id})],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -231,7 +236,7 @@ impl Store {
             &[json!({"type":"task_session_resumed","card_id":card_id})],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -278,7 +283,7 @@ impl Store {
             &[],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 
@@ -303,7 +308,7 @@ impl Store {
             &[json!({"type":"task_session_detached","card_id":card_id})],
             "",
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(after)
     }
 

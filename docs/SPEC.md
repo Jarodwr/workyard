@@ -89,6 +89,7 @@ The Rust core exposes typed `Card` and `Question` snapshots, distinct board/card
 | `projects`, `project_repositories`, `project_documents`, `project_stakeholders` | Added in migration 7. A board has an optional `project_id`; a question has an optional `stakeholder_id`. See [PROJECTS.md](PROJECTS.md) |
 | `card_changes` | Added in migration 7. Linked repository, working and target branch, `commit_oid`, `review_required`, `approved_commit_oid`, `reviewer`, `version`. A new commit clears approval |
 | `phases` | Added in migrations 8 and 9. Ordered per board with a unique name, description, `version`, and `closed_at`; `boards.current_phase_id` points at the current one; `cards` and `questions` carry `phase_id`. See ADR 0001 |
+| `orchestrator_sessions` | Added in migration 11. One row per board: `desired_state` (`running`, `paused`, `draining`), event `cursor`, `pool_size`, and the lease (`holder`, `host`, `pid`, `epoch`, `heartbeat_at`, `lease_expires_at`). See [ORCHESTRATOR.md](ORCHESTRATOR.md) |
 | `dependencies.scope` | Added in migration 7: `start` (default) or `finish` |
 | `cards.cancelled_at`, `cancellation_reason`, `cancelled_by` | Added in migration 8. A terminal marker, not a lane. See ADR 0002 |
 
@@ -224,7 +225,7 @@ The UI treats events as animation cues. A single event with multiple effects tri
 
 Every CLI command accepts `--db`, `--actor` (or `WORKYARD_ACTOR`), and `--json`. JSON mode writes exactly one structured result to stdout, including typed errors; diagnostics go to stderr. Exit codes: 0 success, 1 usage, 2 validation/rule failure, 3 version/ownership conflict. Human-readable output is the default.
 
-Commands are grouped by who calls them. Reads stay at the top level. Each mutating command on an existing entity takes `--expected-version`, except notes and (planned) writes by a card's owner.
+Commands are grouped by who calls them. Reads stay at the top level. Each mutating command on an existing entity takes `--expected-version`, with two exceptions. Notes never need one. `task progress`, `task move`, `task update`, and `task release` may omit it when the caller owns the card, since the claim already serializes the owner's writes; any other caller gets `version_required` (or `ownership_conflict` if someone else owns the card). Force-release always needs it. Every response carries the entity's new `version`.
 
 ```text
 # reads (anyone)
@@ -251,6 +252,12 @@ workyard plan phase list|add|describe|complete|advance|assign
 workyard plan cancel <C-1> --reason "..."
 
 # orch: orchestrator and operator
+workyard orch status <B-1>                       # state, cursor, pool, lease
+workyard orch pause|resume|drain <B-1>           # desired state; pause only stops new dispatches
+workyard orch pool <B-1> <n>
+workyard orch acquire <B-1> [--holder H] [--pid N] [--lease S] [--pool N]   # prints actor orch:<board>#<epoch>
+workyard --actor orch:<B-1>#<epoch> orch heartbeat|release|cursor|dispatch <B-1> ...
+workyard events --since N --follow               # one JSON line per event, wakes on commit
 workyard orch session attach|pause|resume|ack|detach|briefing <C-1> ...
 workyard orch transfer <C-1> --to-actor A
 workyard orch force-release <C-1> --reason "..."

@@ -337,7 +337,7 @@ fn v7_database_gets_phases_and_preserves_existing_work() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        10
+        11
     );
 }
 
@@ -799,7 +799,7 @@ fn existing_v1_database_migrates_to_agent_types_and_notes() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 #[test]
@@ -1601,4 +1601,120 @@ fn owner_may_omit_version_but_others_may_not() {
     let err = store.release_card("cli", key, None::<i64>, Some("agent died")).unwrap_err();
     assert_eq!(err.code, "version_required");
     store.release_card("agent:a", key, None::<i64>, None).unwrap();
+}
+
+fn expire_lease(store: &Store, board_key: &str) {
+    store
+        .open()
+        .unwrap()
+        .execute(
+            "UPDATE orchestrator_sessions SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE board_id=(SELECT id FROM boards WHERE key=?1)",
+            [board_key],
+        )
+        .unwrap();
+}
+
+#[test]
+fn only_one_orchestrator_holds_a_board_and_takeover_fences_the_old_one() {
+    let (_dir, store, board) = setup();
+    let first = store.orchestrator_acquire(&board, "run-1", "h", None, 30, Some(2)).unwrap();
+    assert_eq!(first["epoch"], 1);
+    assert_eq!(first["actor"], format!("orch:{board}#1"));
+    let err = store.orchestrator_acquire(&board, "run-2", "h", None, 30, None).unwrap_err();
+    assert_eq!(err.code, "orchestrator_conflict");
+    assert_eq!(err.details.as_ref().unwrap()["current"]["holder"], "run-1");
+    let old = first["actor"].as_str().unwrap().to_owned();
+    store.orchestrator_heartbeat(&old, &board, 30).unwrap();
+
+    // Once the lease expires another process may take over, with a higher epoch.
+    expire_lease(&store, &board);
+    let second = store.orchestrator_acquire(&board, "run-2", "h", None, 30, None).unwrap();
+    assert_eq!(second["epoch"], 2);
+    assert_eq!(second["pool_size"], 2, "pool size survives takeover");
+
+    // The replaced orchestrator is fenced out of every write, not only its own commands.
+    assert_eq!(store.orchestrator_heartbeat(&old, &board, 30).unwrap_err().code, "stale_epoch");
+    let card = store.create_card("cli", &board, "Task", "", "P2", None).unwrap();
+    let err = store
+        .add_card_note(&old, card["key"].as_str().unwrap(), "late write")
+        .unwrap_err();
+    assert_eq!(err.code, "stale_epoch");
+    store.add_card_note(second["actor"].as_str().unwrap(), card["key"].as_str().unwrap(), "ok").unwrap();
+
+    // Releasing frees the board but keeps the epoch, so the released actor stays fenced.
+    store.orchestrator_release(second["actor"].as_str().unwrap(), &board).unwrap();
+    assert_eq!(
+        store.add_card_note(second["actor"].as_str().unwrap(), card["key"].as_str().unwrap(), "x").unwrap_err().code,
+        "stale_epoch"
+    );
+    assert_eq!(store.orchestrator_acquire(&board, "run-3", "h", None, 30, None).unwrap()["epoch"], 3);
+}
+
+#[test]
+fn dead_holder_on_same_host_can_be_replaced_before_lease_expiry() {
+    let (_dir, store, board) = setup();
+    store.orchestrator_acquire(&board, "run-1", "this-host", Some(999_999_999), 600, None).unwrap();
+    // A different host cannot tell, so it must wait for expiry.
+    assert_eq!(
+        store.orchestrator_acquire(&board, "run-2", "other-host", None, 30, None).unwrap_err().code,
+        "orchestrator_conflict"
+    );
+    // The same host sees the pid is gone.
+    assert_eq!(store.orchestrator_acquire(&board, "run-2", "this-host", None, 30, None).unwrap()["epoch"], 2);
+}
+
+#[test]
+fn dispatch_starts_work_atomically_and_respects_pause_and_pool_size() {
+    let (_dir, store, board) = setup();
+    let a = store.create_card("cli", &board, "A", "", "P2", None).unwrap();
+    store.create_card("cli", &board, "B", "", "P2", None).unwrap();
+    let lease = store.orchestrator_acquire(&board, "run-1", "h", None, 30, Some(1)).unwrap();
+    let actor = lease["actor"].as_str().unwrap().to_owned();
+
+    store.orchestrator_set_state("cli", &board, "paused").unwrap();
+    let idle = store.orchestrator_dispatch(&actor, &board, "agent:w1", "claude", "sess-1", None).unwrap();
+    assert_eq!(idle["reason"], "paused");
+    assert!(store.next_ready_task(&board, None).unwrap().is_object(), "planning edits stay visible");
+
+    store.orchestrator_set_state("cli", &board, "running").unwrap();
+    let events_before = store.latest_event_id().unwrap();
+    let started = store.orchestrator_dispatch(&actor, &board, "agent:w1", "claude", "sess-1", None).unwrap();
+    assert_eq!(started["dispatch"], "claim");
+    assert_eq!(started["card"]["key"], a["key"]);
+    assert_eq!(started["card"]["owner_actor"], "agent:w1");
+    assert_eq!(started["session"]["external_session_id"], "sess-1");
+    assert_eq!(store.latest_event_id().unwrap() - events_before, 4, "claim, move, attach, dispatched");
+
+    // Pool size 1 is full until the worker pauses or finishes.
+    let full = store.orchestrator_dispatch(&actor, &board, "agent:w2", "claude", "sess-2", None).unwrap();
+    assert_eq!(full["reason"], "pool_full");
+    store.pause_task_session("agent:w1", a["key"].as_str().unwrap(), None).unwrap();
+    // A paused task is offered for resume before any new Backlog work, without being changed.
+    let resume = store.orchestrator_dispatch(&actor, &board, "agent:w2", "claude", "sess-2", None).unwrap();
+    assert_eq!(resume["dispatch"], "resume");
+    assert_eq!(resume["card"]["key"], a["key"]);
+    store.detach_task_session("agent:w1", a["key"].as_str().unwrap()).unwrap();
+    let second = store.orchestrator_dispatch(&actor, &board, "agent:w2", "claude", "sess-2", None).unwrap();
+    assert_eq!(second["card"]["title"], "B");
+
+    // A failed dispatch rolls back completely: the duplicate session ID is rejected.
+    store.orchestrator_set_pool("cli", &board, 4).unwrap();
+    store.create_card("cli", &board, "C", "", "P2", None).unwrap();
+    let before = store.latest_event_id().unwrap();
+    assert!(store.orchestrator_dispatch(&actor, &board, "agent:w3", "claude", "sess-2", None).is_err());
+    assert_eq!(store.latest_event_id().unwrap(), before);
+    assert_eq!(store.view_card("C-3").unwrap()["owner_actor"], serde_json::Value::Null);
+}
+
+#[test]
+fn committed_writes_publish_the_latest_event_id_to_the_tick_file() {
+    let (_dir, store, board) = setup();
+    let marker = store.tick_marker();
+    store.create_card("cli", &board, "Task", "", "P2", None).unwrap();
+    let tick = std::fs::read_to_string(store.tick_path()).unwrap();
+    assert_eq!(tick.trim().parse::<i64>().unwrap(), store.latest_event_id().unwrap());
+    let next = store.wait_for_tick(&marker, std::time::Duration::from_secs(1));
+    assert_ne!(next, marker);
+    // Nothing changed since: waiting times out with the same marker.
+    assert_eq!(store.wait_for_tick(&next, std::time::Duration::from_millis(60)), next);
 }

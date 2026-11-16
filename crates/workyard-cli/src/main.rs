@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
-use workyard_core::{BoardFilter, Error, Store};
+use workyard_core::{BoardFilter, DEFAULT_LEASE_SECONDS, Error, Store};
 
 #[derive(Parser)]
 #[command(name = "workyard", about = "Local kanban for work with AI agents")]
@@ -84,6 +84,9 @@ enum Command {
         since: i64,
         #[arg(long, default_value_t = 100)]
         limit: i64,
+        /// Keep running and print each new event as one JSON line, waking on every commit
+        #[arg(long)]
+        follow: bool,
     },
 }
 
@@ -294,6 +297,51 @@ enum PlanCommand {
 
 #[derive(Subcommand)]
 enum OrchCommand {
+    /// Show the board's orchestrator: state, cursor, pool size, and lease.
+    Status { board: String },
+    /// Stop dispatching new work. Running workers continue.
+    Pause { board: String },
+    /// Resume dispatching.
+    Resume { board: String },
+    /// Dispatch nothing new and let running workers finish.
+    Drain { board: String },
+    /// Set how many workers may run at once.
+    Pool { board: String, size: i64 },
+    /// Take the board's lease. Fails with orchestrator_conflict while another holds it.
+    /// Prints the actor (orch:<board>#<epoch>) to use for every later orchestrator command.
+    Acquire {
+        board: String,
+        #[arg(long, default_value = "orchestrator")]
+        holder: String,
+        #[arg(long)]
+        pid: Option<i64>,
+        #[arg(long, default_value_t = DEFAULT_LEASE_SECONDS)]
+        lease: i64,
+        #[arg(long)]
+        pool: Option<i64>,
+    },
+    /// Renew the lease (use the orchestrator actor). The reply carries the desired state.
+    Heartbeat {
+        board: String,
+        #[arg(long, default_value_t = DEFAULT_LEASE_SECONDS)]
+        lease: i64,
+    },
+    /// Release the lease (use the orchestrator actor).
+    Release { board: String },
+    /// Record the last event fully processed (use the orchestrator actor).
+    Cursor { board: String, to: i64 },
+    /// Pick work and start it atomically (use the orchestrator actor).
+    Dispatch {
+        board: String,
+        #[arg(long)]
+        worker: String,
+        #[arg(long)]
+        runner: String,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        agent_type: Option<String>,
+    },
     Transfer {
         card: String,
         #[arg(long)]
@@ -458,7 +506,7 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
             since,
             limit,
         } => store.view_history(&entity, since, limit)?,
-        Command::Events { since, limit } => store.poll_events(since, limit)?,
+        Command::Events { since, limit, .. } => store.poll_events(since, limit)?,
 
     })
 }
@@ -672,6 +720,37 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
 
 fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::Result<Value> {
     Ok(match command {
+        OrchCommand::Status { board } => store.orchestrator_status(&board)?,
+        OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
+        OrchCommand::Resume { board } => store.orchestrator_set_state(actor, &board, "running")?,
+        OrchCommand::Drain { board } => store.orchestrator_set_state(actor, &board, "draining")?,
+        OrchCommand::Pool { board, size } => store.orchestrator_set_pool(actor, &board, size)?,
+        OrchCommand::Acquire {
+            board,
+            holder,
+            pid,
+            lease,
+            pool,
+        } => store.orchestrator_acquire(&board, &holder, &hostname(), pid, lease, pool)?,
+        OrchCommand::Heartbeat { board, lease } => {
+            store.orchestrator_heartbeat(actor, &board, lease)?
+        }
+        OrchCommand::Release { board } => store.orchestrator_release(actor, &board)?,
+        OrchCommand::Cursor { board, to } => store.orchestrator_set_cursor(actor, &board, to)?,
+        OrchCommand::Dispatch {
+            board,
+            worker,
+            runner,
+            session_id,
+            agent_type,
+        } => store.orchestrator_dispatch(
+            actor,
+            &board,
+            &worker,
+            &runner,
+            &session_id,
+            agent_type.as_deref(),
+        )?,
         OrchCommand::Transfer {
             card,
             to_actor,
@@ -733,8 +812,54 @@ fn run_admin(store: &Store, actor: &str, command: AdminCommand) -> workyard_core
     })
 }
 
+fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().to_owned())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "localhost".into())
+}
+
+/// Print each new event as one JSON line, waking on every commit (with a 2s safety poll).
+/// The marker is read before the query, so a write landing in between is never missed.
+fn follow_events(store: &Store, mut cursor: i64, limit: i64) -> workyard_core::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    loop {
+        let marker = store.tick_marker();
+        let page = store.poll_events(cursor, limit)?;
+        for event in page["events"].as_array().into_iter().flatten() {
+            if writeln!(out, "{event}").and_then(|_| out.flush()).is_err() {
+                return Ok(());
+            }
+        }
+        cursor = page["cursor"].as_i64().unwrap_or(cursor);
+        if page["has_more"] != true {
+            store.wait_for_tick(&marker, std::time::Duration::from_secs(2));
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
+    if let Command::Events {
+        since,
+        limit,
+        follow: true,
+    } = &cli.command
+    {
+        let path = match &cli.db {
+            Some(path) => Ok(path.clone()),
+            None => Store::default_path(),
+        };
+        if let Err(error) = path.and_then(|p| follow_events(&Store::new(p), *since, *limit)) {
+            eprintln!("{error}");
+            std::process::exit(exit_code(&error));
+        }
+        return;
+    }
     let path = match cli.db {
         Some(path) => Ok(path),
         None => Store::default_path(),

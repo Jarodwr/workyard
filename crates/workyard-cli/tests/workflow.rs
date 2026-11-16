@@ -174,3 +174,91 @@ fn cli_session_commands_select_paused_work_before_backlog() {
     assert_eq!(call(&["next", board_key])["key"], backlog["key"]);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn cli_orchestrator_lease_pause_dispatch_and_follow() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("workyard-orch-cli-{nonce}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("board.db");
+    let run = |actor: &str, args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_workyard"))
+            .args(["--db", db.to_str().unwrap(), "--actor", actor, "--json"])
+            .args(args)
+            .output()
+            .unwrap();
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        (output.status.code().unwrap(), value)
+    };
+    let call = |actor: &str, args: &[&str]| -> Value {
+        let (code, value) = run(actor, args);
+        assert_eq!(code, 0, "{value}");
+        value["data"].clone()
+    };
+    let board = call("cli", &["plan", "create-board", "Orchestrated"]);
+    let key = board["key"].as_str().unwrap();
+    call("cli", &["task", "add-card", key, "First"]);
+    call("cli", &["task", "add-card", key, "Second"]);
+
+    // A follower started now sees every later commit without polling the database.
+    let mut follower = Command::new(env!("CARGO_BIN_EXE_workyard"))
+        .args(["--db", db.to_str().unwrap(), "events", "--follow", "--since", "0"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = follower.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let wait = std::time::Duration::from_secs(5);
+    for _ in 0..3 {
+        rx.recv_timeout(wait).expect("backlog event");
+    }
+
+    let lease = call("cli", &["orch", "acquire", key, "--holder", "test", "--pool", "1"]);
+    let actor = lease["actor"].as_str().unwrap().to_owned();
+    assert_eq!(actor, format!("orch:{key}#1"));
+    let line = rx.recv_timeout(wait).expect("acquire event");
+    assert!(line.contains("orchestrator_acquired"), "{line}");
+
+    // Only one orchestrator per board.
+    let (code, conflict) = run("cli", &["orch", "acquire", key, "--holder", "second"]);
+    assert_eq!(code, 2);
+    assert_eq!(conflict["error"]["code"], "orchestrator_conflict");
+
+    // Pausing stops dispatch; resuming lets it claim, move, and attach in one step.
+    call("cli", &["orch", "pause", key]);
+    let idle = call(&actor, &["orch", "dispatch", key, "--worker", "agent:w1", "--runner", "claude", "--session-id", "s-1"]);
+    assert_eq!(idle["reason"], "paused");
+    call("cli", &["orch", "resume", key]);
+    let started = call(&actor, &["orch", "dispatch", key, "--worker", "agent:w1", "--runner", "claude", "--session-id", "s-1"]);
+    assert_eq!(started["card"]["owner_actor"], "agent:w1");
+    assert_eq!(started["session"]["external_session_id"], "s-1");
+    assert_eq!(call(&actor, &["orch", "heartbeat", key])["desired_state"], "running");
+
+    // The owner can report progress without a version; a stranger cannot.
+    let card = started["card"]["key"].as_str().unwrap();
+    call("agent:w1", &["task", "progress", card, "30", "--note", "going"]);
+    let (code, denied) = run("agent:other", &["task", "progress", card, "40"]);
+    assert_eq!(code, 3);
+    assert_eq!(denied["error"]["code"], "ownership_conflict");
+
+    // After release the old actor is fenced out of everything.
+    call(&actor, &["orch", "release", key]);
+    let (_, stale) = run(&actor, &["orch", "heartbeat", key]);
+    assert_eq!(stale["error"]["code"], "stale_epoch");
+    let (_, stale) = run(&actor, &["task", "note", card, "late"]);
+    assert_eq!(stale["error"]["code"], "stale_epoch");
+
+    follower.kill().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
