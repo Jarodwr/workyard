@@ -1,4 +1,5 @@
 use serde_json::Value;
+use tauri::Emitter;
 use workyard_core::Store;
 
 fn store() -> Result<Store, String> {
@@ -71,8 +72,38 @@ fn unassign_question_stakeholder(question: String, expected_version: i64) -> Res
     wrap(store()?.unassign_question_stakeholder("ui", &question, expected_version))
 }
 
+/// A human approves the current commit of a linked change. Agents have no command for this.
+#[tauri::command]
+fn approve_change(change: String, expected_version: i64) -> Result<Value, String> {
+    let reviewer = std::env::var("USER").unwrap_or_else(|_| "reviewer".into());
+    wrap(store()?.approve_card_change("ui", &change, &reviewer, expected_version))
+}
+#[tauri::command]
+fn orchestrator_status(board: String) -> Result<Value, String> {
+    wrap(store()?.orchestrator_status(&board))
+}
+#[tauri::command]
+fn set_orchestrator_state(board: String, state: String) -> Result<Value, String> {
+    wrap(store()?.orchestrator_set_state("ui", &board, &state))
+}
+
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            // Wake the UI on every committed write (the core touches `<db>.tick`), plus a
+            // slow fallback every two seconds. The UI then reads the event log, which stays
+            // the source of truth, so a missed tick only delays an update.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let Ok(store) = store() else { return };
+                let mut marker = store.tick_marker();
+                loop {
+                    marker = store.wait_for_tick(&marker, std::time::Duration::from_secs(2));
+                    let _ = handle.emit("workyard-tick", ());
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_projects,
             view_project,
@@ -85,7 +116,10 @@ fn main() {
             list_questions,
             answer_question,
             assign_question_stakeholder,
-            unassign_question_stakeholder
+            unassign_question_stakeholder,
+            approve_change,
+            orchestrator_status,
+            set_orchestrator_state
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Workyard");

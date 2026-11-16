@@ -9,7 +9,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import type { Board, Card, CardDetail as Detail, Question } from "@/api";
+import type { Board, Card, CardChange, CardDetail as Detail, Question } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard } from "@/components/ui/card";
@@ -23,6 +23,7 @@ type Props = {
   questions: Question[];
   onClose: () => void;
   onAddNote: (card: Card, body: string) => Promise<boolean>;
+  onApproveChange: (change: CardChange) => Promise<boolean>;
 };
 
 export function CardDetail({
@@ -32,6 +33,7 @@ export function CardDetail({
   questions,
   onClose,
   onAddNote,
+  onApproveChange,
 }: Props) {
   const reduced = useReducedMotion();
   const [note, setNote] = useState("");
@@ -113,6 +115,7 @@ export function CardDetail({
                     <UserRound className="size-3.5" />{" "}
                     {card.owner_actor || "Unclaimed"}
                   </p>
+                  {card.stale && <p className="mt-1.5 flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-300"><Clock3 className="size-3" /> Stale since {card.last_activity_at ? new Date(card.last_activity_at).toLocaleString() : "it was claimed"}</p>}
                 </UiCard>
                 <UiCard className="p-2.5 shadow-none">
                   <p className="text-[11px] text-muted-foreground">Agent type</p>
@@ -158,6 +161,9 @@ export function CardDetail({
                   {detail.changes.map((change) => <UiCard key={change.id} className="p-3 text-xs shadow-none">
                     <p className="font-medium">{change.working_branch} <span className="text-muted-foreground">→ {change.target_branch}</span></p>
                     <p className="mt-1 text-muted-foreground">{change.commit_oid ? `Commit ${change.commit_oid.slice(0, 12)}` : "Commit not recorded"}{change.review_required ? ` · ${change.approved_commit_oid === change.commit_oid && change.commit_oid ? "Review approved" : "Review pending"}` : ""}</p>
+                    {change.review_required && !!change.commit_oid && change.approved_commit_oid !== change.commit_oid && (
+                      <Button size="sm" className="mt-2 h-7 text-xs" onClick={() => void onApproveChange(change)}>Approve this commit</Button>
+                    )}
                   </UiCard>)}
                 </section>
               )}

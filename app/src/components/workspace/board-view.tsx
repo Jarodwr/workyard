@@ -8,10 +8,12 @@ import {
   ArrowLeft,
   LockKeyhole,
   Bot,
+  Clock3,
   GitFork,
   CircleHelp,
 } from "lucide-react";
-import type { Board, Project, Question } from "@/api";
+import type { Board, Orchestrator, Project, Question } from "@/api";
+import { OrchestratorBar } from "@/components/workspace/orchestrator-bar";
 import { DependencyView } from "@/components/workspace/dependency-view";
 import { Badge } from "@/components/ui/badge";
 import { Card as UiCard } from "@/components/ui/card";
@@ -25,6 +27,8 @@ type Props = {
   view: BoardSection;
   phaseId: string | null;
   cues: Record<string, string>;
+  orchestrator: Orchestrator | null;
+  onOrchestratorState: (state: Orchestrator["desired_state"]) => void;
   onOpen: (id: string) => void;
   onAnswer: (question: Question, answer: string, note: string) => Promise<boolean>;
   onAssignStakeholder: (question: Question, stakeholderId: string) => Promise<boolean>;
@@ -48,6 +52,8 @@ export function BoardView({
   view,
   phaseId,
   cues,
+  orchestrator,
+  onOrchestratorState,
   onOpen,
   onAnswer,
   onAssignStakeholder,
@@ -59,6 +65,7 @@ export function BoardView({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <h1 className="sr-only">{board.name} — {view}</h1>
+      <OrchestratorBar board={board.key} orchestrator={orchestrator} onState={onOrchestratorState} />
       {view === "dependencies" ? (
         <div className="min-h-0 flex-1">
           <DependencyView
@@ -132,7 +139,7 @@ export function BoardView({
                                 </Badge>
                               )}
                             </div>
-                            {(board.phases.length>1 || card.agent_type || card.blocked || card.open_question_count > 0 || !card.can_finish) && (
+                            {(board.phases.length>1 || card.agent_type || card.stale || card.blocked || card.open_question_count > 0 || !card.can_finish) && (
                               <div className="mt-1 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
                                 {board.phases.length>1 && <span className="shrink-0 truncate">{board.phases.find((phase)=>phase.id===card.phase_id)?.name}</span>}
                                 {card.agent_type && (
@@ -140,6 +147,11 @@ export function BoardView({
                                     <Bot className="size-3 shrink-0" />
                                     {card.agent_type}
                                   </span>
+                                )}
+                                {card.stale && (
+                                  <Badge variant="outline" className="shrink-0 gap-0.5 border-amber-500/40 bg-amber-500/10 px-1 py-0 text-[9px] leading-4 text-amber-700 dark:text-amber-300" title={`No activity from ${card.owner_actor ?? "the owner"} since ${card.last_activity_at ?? "it was claimed"}`}>
+                                    <Clock3 className="size-2.5" /> Stale
+                                  </Badge>
                                 )}
                                 {card.blocked && (
                                   <span className="flex min-w-0 items-center gap-1 truncate text-amber-700 dark:text-amber-300">

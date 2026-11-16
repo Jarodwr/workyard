@@ -26,6 +26,8 @@ export type Card = {
   review_gates?: { change_id: string; working_branch: string; commit_oid: string; approved: boolean; reviewer: string | null }[];
   can_finish?: boolean;
   open_question_count: number;
+  stale?: boolean;
+  last_activity_at?: string;
 };
 export type Lane = { id: string; name: string; kind: string; position: number; version: number; cards: Card[] };
 export type Phase = { id: string; board_id: string; name: string; description: string; version: number; closed_at: string | null; position: number; status: "closed" | "current" | "future" };
@@ -44,7 +46,8 @@ export type BoardEvent = { id: number; type: string; board_id: string | null; en
 export type EventPage = { events: BoardEvent[]; cursor: number; has_more: boolean };
 export type Question = { id: string; key: string; board_id: string; phase_id: string; stakeholder_id?: string | null; stakeholder?: { name: string; role: string; contact: string }; kind: "engineering" | "business"; title: string; body: string; options: string[]; recommended_option: string; recommendation_reason: string; status: string; answer: string; answer_note: string; version: number; blocks: string[] };
 export type Dependency = { id: string; from_card_id: string; to_card_id: string | null; to_question_id: string | null; scope?: "start" | "finish" };
-export type CardChange = { id: string; repository_id: string; working_branch: string; target_branch: string; commit_oid: string; review_required: boolean; approved_commit_oid: string | null; reviewer: string | null };
+export type CardChange = { id: string; version: number; repository_id: string; working_branch: string; target_branch: string; commit_oid: string; review_required: boolean; approved_commit_oid: string | null; reviewer: string | null };
+export type Orchestrator = { board_key: string; desired_state: "running" | "paused" | "draining"; pool_size: number; connected: boolean; holder: string | null; epoch: number; heartbeat_at: string | null };
 export type CardNote = { id: string; card_id: string; actor: string; body: string; created_at: string };
 export type TaskSession = { id: string; card_id: string; owner_actor: string; runner: string; external_session_id: string; attached_at: string; paused_at: string | null; waiting_question_id: string | null; waiting_question_key: string | null; last_delivered_event_id: number; detached_at: string | null };
 export type CardDetail = Card & { dependencies: Dependency[]; changes: CardChange[]; notes: CardNote[]; session: TaskSession | null; events: { id: number; type: string; actor: string; ts: string }[] };
@@ -62,6 +65,9 @@ export const api = {
   answerQuestion: (question: Question, answer: string, note: string) => invoke<Question>("answer_question", { question: question.key, answer, note, expectedVersion: question.version }),
   assignQuestionStakeholder: (question: Question, stakeholder: string) => invoke<Question>("assign_question_stakeholder", { question: question.key, stakeholder, expectedVersion: question.version }),
   unassignQuestionStakeholder: (question: Question) => invoke<Question>("unassign_question_stakeholder", { question: question.key, expectedVersion: question.version }),
+  approveChange: (change: CardChange) => invoke<CardChange>("approve_change", { change: change.id, expectedVersion: change.version }),
+  orchestratorStatus: (board: string) => invoke<Orchestrator>("orchestrator_status", { board }),
+  setOrchestratorState: (board: string, state: Orchestrator["desired_state"]) => invoke<Orchestrator>("set_orchestrator_state", { board, state }),
 };
 
 export const isDemo = !("__TAURI_INTERNALS__" in window);
@@ -104,6 +110,7 @@ let demoQuestions: Question[] = [
 ];
 let demoDependencies: Dependency[] = [{id:"demo-dep-1",from_card_id:"demo-2",to_card_id:"demo-1",to_question_id:null,scope:"finish"}];
 let demoNotes: CardNote[] = [];
+let demoOrchestrator: Orchestrator = { board_key: "B-1", desired_state: "running", pool_size: 2, connected: true, holder: "cli:demo", epoch: 1, heartbeat_at: null };
 const clone = <T,>(value: T): T => structuredClone(value);
 function demoFindCard(id: string): Card {
   const card = demoBoard.lanes.flatMap((lane) => lane.cards).find((c) => c.id === id || c.key === id);
@@ -114,6 +121,9 @@ function demoEvent(type: string, entityId: string) {
   demoEvents.push({ id: demoEvents.length + 1, type, board_id: demoBoard.id, entity_type: "card", entity_id: entityId, effects: [] });
 }
 const demoApi = {
+  approveChange: async (change: CardChange): Promise<CardChange> => ({ ...clone(change), approved_commit_oid: change.commit_oid, reviewer: "demo", version: change.version + 1 }),
+  orchestratorStatus: async (board: string): Promise<Orchestrator> => ({ ...clone(demoOrchestrator), board_key: board }),
+  setOrchestratorState: async (board: string, state: Orchestrator["desired_state"]): Promise<Orchestrator> => { demoOrchestrator = { ...demoOrchestrator, desired_state: state }; demoEvent("orchestrator_state_changed", board); return { ...clone(demoOrchestrator), board_key: board }; },
   listProjects: async (): Promise<ProjectListItem[]> => [{ id: "demo-project", name: "Workyard", description: "Local agent workspace", version: 1, board_count: 2 }, { id: "demo-field-notes", name: "Field Notes", description: "A non-code research project", version: 1, board_count: 1 }],
   viewProject: async (project: string): Promise<Project> => project === "demo-field-notes" ? { id: "demo-field-notes", name: "Field Notes", description: "A non-code research project", version: 1, board_count: 1, boards: [{ id: demoResearchBoard.id, key: demoResearchBoard.key, name: demoResearchBoard.name, description: demoResearchBoard.description, archived: false }], repositories: [], documents: [], stakeholders: [], changes: [] } : { id: "demo-project", name: "Workyard", description: "Local agent workspace", version: 1, board_count: 2, boards: [demoBoard,demoRuntimeBoard].map((board)=>({id:board.id,key:board.key,name:board.name,description:board.description,archived:false})), repositories: [{ id: "demo-repo", path: "~/Development/workyard", target_branch: "main", remote_url: null }], documents: [{ id: "demo-adr", repository_id: "demo-repo", path: "docs/adr/0001-board-phases-and-scheduling.md", kind: "adr", title: "Board phases and scheduling" }, { id: "demo-diagram", repository_id: "demo-repo", path: "docs/architecture.md", kind: "diagram", title: "Workyard architecture" }, { id: "demo-doc", repository_id: "demo-repo", path: "docs/SPEC.md", kind: "documentation", title: "Build spec" }], stakeholders: [{ id: "demo-person", name: "Product lead", role: "Business decisions", contact: "Local demo contact" }, { id: "demo-engineering", name: "Engineering lead", role: "Architecture review", contact: "Local demo contact" }], changes: [] },
   listBoards: async (): Promise<BoardListItem[]> => [demoBoard,demoRuntimeBoard,demoResearchBoard].map((board) => ({ ...clone(board), lanes: board.lanes.map((lane) => ({ lane_id: lane.id, name: lane.name, count: lane.cards.length })) })),

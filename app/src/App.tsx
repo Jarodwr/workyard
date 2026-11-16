@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, FolderKanban, LayoutDashboard, UserRound, X } from "lucide-react";
 import {
   client,
@@ -6,6 +7,7 @@ import {
   type Board,
   type BoardEvent,
   type BoardListItem,
+  type Orchestrator,
   type CardDetail as Detail,
   type Question,
   type Project,
@@ -44,24 +46,27 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [cues, setCues] = useState<Record<string, string>>({});
+  const [orchestrator, setOrchestrator] = useState<Orchestrator | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const cursor = useRef(0);
 
   const refresh = useCallback(
     async (key: string | null, selectedProject?: string | null) => {
-      const [nextBoards, nextQuestions, nextBoard, nextProjects, nextProject] = await Promise.all([
+      const [nextBoards, nextQuestions, nextBoard, nextProjects, nextProject, nextOrchestrator] = await Promise.all([
         client.listBoards(),
         client.listQuestions(),
         key ? client.viewBoard(key) : Promise.resolve(null),
         client.listProjects(),
         selectedProject && selectedProject !== unassignedId ? client.viewProject(selectedProject) : Promise.resolve(null),
+        key ? client.orchestratorStatus(key) : Promise.resolve(null),
       ]);
       setBoards(nextBoards);
       setProjects(nextProjects);
       if (nextProject) setProject(nextProject);
       setQuestions(nextQuestions);
       if (nextBoard) setBoard(nextBoard);
+      setOrchestrator(nextOrchestrator);
     },
     [],
   );
@@ -170,12 +175,22 @@ export default function App() {
         busy = false;
       }
     };
-    const timer = window.setInterval(() => {
+    // The desktop wakes on the core's commit tick (and every two seconds regardless);
+    // the demo has no backend, so it keeps its fast poll.
+    const fallback = window.setInterval(() => {
       void poll();
-    }, 250);
+    }, isDemo ? 250 : 3000);
+    let unlisten: (() => void) | undefined;
+    if (!isDemo) {
+      void listen("workyard-tick", () => void poll()).then((stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      });
+    }
     return () => {
       active = false;
-      window.clearInterval(timer);
+      window.clearInterval(fallback);
+      unlisten?.();
     };
   }, [boardKey, projectId, refresh, loading]);
 
@@ -282,6 +297,8 @@ export default function App() {
               view={section}
               phaseId={phaseId}
               cues={cues}
+              orchestrator={orchestrator}
+              onOrchestratorState={(state) => mutate(() => client.setOrchestratorState(board.key, state))}
               onOpen={setSelectedId}
               onAnswer={(question, answer, note) => mutate(() => client.answerQuestion(question, answer, note))}
               onAssignStakeholder={(question, stakeholderId) => mutate(() => stakeholderId ? client.assignQuestionStakeholder(question, stakeholderId) : client.unassignQuestionStakeholder(question))}
@@ -309,6 +326,7 @@ export default function App() {
         questions={questions.filter((question) => question.board_id === board?.id)}
         onClose={closeDetail}
         onAddNote={(card, body) => mutate(() => client.addCardNote(card.key, body))}
+        onApproveChange={(change) => mutate(() => client.approveChange(change))}
       />
     </div>
   );

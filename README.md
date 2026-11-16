@@ -23,7 +23,7 @@ The CLI and Tauri backend share the same Rust command layer. Agents call the CLI
 
 ## Desktop UI
 
-The frontend uses Tailwind CSS 4 with local shadcn/ui components in `app/src/components/ui`. The desktop is for watching agent work, answering questions, and leaving notes on cards. Agents create and manage boards, tasks, progress, and dependencies through the CLI. Run `mise run install`, then `mise run dev`. The frontend uses Yarn 3.6.1 only; do not run `npm install`.
+The frontend uses Tailwind CSS 4 with local shadcn/ui components in `app/src/components/ui`. The desktop is for watching agent work, answering questions, leaving notes on cards, approving reviewed commits, and pausing or resuming a board's orchestrator. Agents create and manage boards, tasks, progress, and dependencies through the CLI. Run `mise run install`, then `mise run dev`. The frontend uses Yarn 3.6.1 only; do not run `npm install`.
 
 ## Current state
 
