@@ -432,6 +432,64 @@ fn a_paused_worker_resumes_with_the_answer_in_its_briefing() {
 }
 
 #[test]
+fn a_human_thread_message_wakes_the_worker_to_reply_and_it_pauses_again_until_answered() {
+    let h = Harness::new();
+    let key = h.card("Needs a conversation");
+    let handle = h.start(1, 3, |launch, store| {
+        let question_key = || store.list_questions(Some(&launch.board_key), Some("open")).unwrap()[0]["key"].as_str().unwrap().to_owned();
+        if !launch.resume {
+            let question = store
+                .raise_question(
+                    &launch.actor, &launch.board_key, "engineering", "Which store?", "",
+                    &["SQLite".to_owned(), "Files".to_owned()], "SQLite", "One file.", &[launch.card_key.clone()],
+                )
+                .unwrap();
+            store.pause_task_session(&launch.actor, &launch.card_key, question["key"].as_str()).unwrap();
+        } else if launch.prompt.contains("conversation turn only") {
+            // Reply first, then wait on the same question again.
+            let q = question_key();
+            store.post_question_message(&launch.actor, &q, "Files are simpler to inspect, SQLite to query.").unwrap();
+            store.pause_task_session(&launch.actor, &launch.card_key, Some(&q)).unwrap();
+        } else {
+            finish_card(launch, store);
+        }
+    });
+    h.wait("question raised", |s| !s.list_questions(Some(&h.board), Some("open")).unwrap().as_array().unwrap().is_empty());
+    let question = h.store.list_questions(Some(&h.board), Some("open")).unwrap()[0].clone();
+    let q = question["key"].as_str().unwrap().to_owned();
+    // Nothing is offered while nobody has written.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(h.launches.lock().unwrap().len(), 1);
+
+    h.store.post_question_message("ui", &q, "What about plain files instead?").unwrap();
+    h.wait("the thread resume", |_| h.launches.lock().unwrap().len() == 2);
+    h.wait("the worker reply", |s| s.list_question_messages(&q).unwrap().as_array().unwrap().len() == 2);
+    wait_until("reply notification", || h.notices.lock().unwrap().iter().any(|(t, b)| t.contains("reply") && b.contains("Files are simpler")));
+    // It paused again on the same open question and is not woken a second time.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(h.launches.lock().unwrap().len(), 2);
+    assert_eq!(h.store.read_question(&q).unwrap().status.as_str(), "open");
+    {
+        let launches = h.launches.lock().unwrap();
+        assert!(launches[1].1);
+        assert!(launches[1].2.contains("conversation turn only"));
+        assert!(launches[1].2.contains("question_message_posted"), "the thread message is in the briefing");
+        assert!(launches[1].2.contains(&format!("workyard question discuss {q}")));
+    }
+
+    // A human answer resumes it for real.
+    let version = h.store.list_questions(Some(&h.board), Some("open")).unwrap()[0]["version"].as_i64().unwrap();
+    h.store.resolve_question("human", &q, "Files", None, version, false).unwrap();
+    h.wait("card done", |s| h.done_count(s) == 1);
+    h.finish(handle);
+    let launches = h.launches.lock().unwrap();
+    assert_eq!(launches.len(), 3);
+    assert_eq!(launches[2].0, key);
+    assert!(launches[2].2.contains("question_answered"));
+    assert!(!launches[2].2.contains("conversation turn only"));
+}
+
+#[test]
 fn a_usage_limit_backs_the_board_off_without_failing_the_card() {
     let h = Harness::new();
     let key = h.card("Interrupted");

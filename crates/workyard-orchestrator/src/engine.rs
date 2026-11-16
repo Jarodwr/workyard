@@ -517,7 +517,10 @@ impl<'a> Orchestrator<'a> {
         if self.store.resume_task_session(actor, &key).is_err() {
             return false; // another dispatcher won, or the wait is no longer resolved
         }
-        let prompt = resume_prompt(&self.board, &key, &pages, &self.prompt_context(&key));
+        let thread_question = (card["resume_reason"] == "thread_message")
+            .then(|| card["session"]["waiting_question_key"].as_str())
+            .flatten();
+        let prompt = resume_prompt(&self.board, &key, &pages, &self.prompt_context(&key), thread_question);
         let workspace = Workspace::from_card(card);
         if !self.launch(actor, &key, &owner, &session_id, prompt, true, workspace) {
             return false;
@@ -753,6 +756,16 @@ impl<'a> Orchestrator<'a> {
                     "Workyard: a question needs you",
                     &format!("{}: {}", after["key"].as_str().unwrap_or("?"), after["title"].as_str().unwrap_or("")),
                 );
+            }
+            "question_message_posted" => {
+                // A worker's reply is for the human; the supervisor's posts are not alerts.
+                let author = after["author"].as_str().unwrap_or_default();
+                if author.starts_with("agent:") && !author.starts_with("agent:supervisor-") {
+                    self.notifier.notify(
+                        "Workyard: a question has a reply",
+                        &format!("{}: {}", after["question_key"].as_str().unwrap_or("?"), after["body"].as_str().unwrap_or("").chars().take(140).collect::<String>()),
+                    );
+                }
             }
             "card_reclaimed" => {
                 let key = self.card_key(entity).unwrap_or_default();
@@ -1001,6 +1014,10 @@ then `workyard orch session pause {key} --waiting-question <Q-key>` and stop; yo
 Example: title \"Should archived boards still show in the board picker?\", options \"Hide them\" / \"Show them dimmed\" / \"Behind a toggle\", recommend \"Behind a toggle\", \
 why \"it keeps the picker short without making archived work unreachable, and the toggle is cheap to build\". Give 2-4 real options, one recommendation and a one-line reason. \
 Do not raise a question for a mechanical blocker: a refused tool or command, a merge conflict you can resolve, a failing test you can fix. Fix it or work around it.\n\
+Question threads: a human may write in the thread of a question you are waiting on instead of choosing an option, and you are then resumed to reply. A human message in a question thread is a conversation turn, not an answer: \
+read the thread (`workyard --json question show <Q-key>`), reply with `workyard question discuss <Q-key> \"<your reply>\"`, and if the discussion warrants it revise the options or recommendation \
+(`workyard task question-options <Q-key> --expected-version <n> --option ... --recommend ... --why ...`). Post your reply before you pause again, then pause again with `workyard orch session pause {key} --waiting-question <Q-key>` and stop. \
+Never answer or drop the question yourself, and do no other work on the card in that turn: only humans resolve a question.\n\
 Code changes: you decide whether this card changes code. If you changed code, link your branch with `workyard task link-change` (no version needed) and integrate it before you move the card to Done; \
 if you changed nothing, say so in the card note and finish."
     )
@@ -1052,11 +1069,25 @@ When finished, run `workyard task move {key} Done`. Do not work on other cards."
     )
 }
 
-fn resume_prompt(board: &str, key: &str, pages: &[Value], ctx: &PromptContext) -> String {
+fn resume_prompt(board: &str, key: &str, pages: &[Value], ctx: &PromptContext, thread_question: Option<&str>) -> String {
     let events: Vec<&Value> = pages
         .iter()
         .flat_map(|page| page["events"].as_array().into_iter().flatten())
         .collect();
+    if let Some(question) = thread_question {
+        // Woken by a human message while the question is still open: reply only, then wait again.
+        return format!(
+            "Resume Workyard card {key} for a conversation turn only. You paused it waiting on question {question}, which is still OPEN: \
+a human wrote in its thread (a `question_message_posted` event below) instead of answering. This is not an answer and the card is not unblocked. \
+Board events since you last saw it:\n{}\n\
+Do this and nothing else: read the thread with `workyard --json question show {question}`, reply with `workyard question discuss {question} \"<your reply>\"`, \
+and if the discussion warrants it revise the options or recommendation with `workyard task question-options {question} --expected-version <n> --option ... --recommend ... --why ...`. \
+You must post your reply before you pause again. Then pause with `workyard orch session pause {key} --waiting-question {question}` and stop. \
+Never answer or drop the question yourself; only a human resolves it. Do not continue the card's work in this turn.\n{}",
+            serde_json::to_string(&events).unwrap_or_default(),
+            worker_guidance(board, key),
+        );
+    }
     format!(
         "Resume Workyard card {key}. You paused it earlier; it is In Progress and claimed by you again. \
 Re-read it with `workyard --json card {key}`. These board events happened since you last saw it, \
@@ -1113,7 +1144,7 @@ a failing test whose fix is a design choice, anything the card's author would wa
 that states the problem and the options you can see (it raises one desktop notification), then take no further action on that card. \
 You may not answer or drop questions (they are for humans), approve changes, move cards between lanes, cancel, force-release a healthy \
 worker, transfer a card, or change a card's description, scope or dependencies; the core refuses these. You may read everything, add \
-notes, place and release holds, resume a paused session and `orch reclaim`. Permissions for workers are `{permissions}`. {integration} \
+notes, place and release holds, resume a paused session and `orch reclaim`. You may post in a question's thread (`workyard question discuss`), which never wakes a worker. Permissions for workers are `{permissions}`. {integration} \
 Say in one line what you did and why.\n\
 Reply 'ready' now."
     )
@@ -1158,8 +1189,9 @@ mod integration_prompt_tests {
     #[test]
     fn prompts_carry_add_card_rule_and_ask_guidance() {
         let claim = claim_prompt("B-1", "C-1", "agent:x", Workspace::Worktree, &ctx(false));
-        let resume = resume_prompt("B-1", "C-1", &[], &ctx(false));
-        for prompt in [&claim, &resume] {
+        let resume = resume_prompt("B-1", "C-1", &[], &ctx(false), None);
+        let thread = resume_prompt("B-1", "C-1", &[], &ctx(false), Some("Q-4"));
+        for prompt in [&claim, &resume, &thread] {
             assert!(prompt.contains("workyard task add-card B-1"));
             assert!(prompt.contains("at most 3 new cards") || prompt.contains("At most 3 new cards") || prompt.contains("Add at most 3 new cards"));
             assert!(prompt.contains("task depend"));
@@ -1170,6 +1202,25 @@ mod integration_prompt_tests {
             assert!(prompt.contains("`workyard task link-change` (no version needed)"));
             assert!(prompt.contains("if you changed nothing, say so in the card note and finish"));
         }
+    }
+
+    #[test]
+    fn prompts_explain_question_threads_and_the_thread_resume_is_distinct() {
+        let claim = claim_prompt("B-1", "C-1", "agent:x", Workspace::Worktree, &ctx(false));
+        let answer = resume_prompt("B-1", "C-1", &[], &ctx(false), None);
+        let thread = resume_prompt("B-1", "C-1", &[], &ctx(false), Some("Q-4"));
+        for prompt in [&claim, &answer, &thread] {
+            assert!(prompt.contains("A human message in a question thread is a conversation turn"));
+            assert!(prompt.contains("workyard question discuss <Q-key>"));
+            assert!(prompt.contains("Post your reply before you pause again"));
+            assert!(prompt.contains("Never answer or drop the question yourself"));
+        }
+        assert!(thread.contains("conversation turn only"));
+        assert!(thread.contains("still OPEN"));
+        assert!(thread.contains("workyard orch session pause C-1 --waiting-question Q-4"));
+        assert!(thread.contains("workyard question discuss Q-4"));
+        assert!(!answer.contains("conversation turn only"));
+        assert!(answer.contains("Continue the work"));
     }
 
     #[test]
