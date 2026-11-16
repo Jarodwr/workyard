@@ -212,7 +212,7 @@ export function DependencyView({
                     )}
                     style={{ left: node.x, top: node.y, width: GRAPH_NODE_WIDTH, height: GRAPH_NODE_HEIGHT }}
                   >
-                    <button className="flex h-full w-full flex-col px-2.5 py-2 text-left" onClick={() => setSelectedId(selectedId === node.id ? null : node.id)} aria-pressed={selectedId === node.id} aria-label={`Trace dependencies for ${node.key} ${node.title}`}>
+                    <button className="flex h-full w-full flex-col px-2.5 py-1.5 text-left" onClick={() => setSelectedId(selectedId === node.id ? null : node.id)} aria-pressed={selectedId === node.id} aria-label={`Trace dependencies for ${node.key} ${node.title}`}>
                       <span className="flex w-full items-center gap-1.5 pr-8 text-[10px] text-muted-foreground">
                         {question ? <CircleHelp className={cn("size-3.5", question.kind === "engineering" ? "text-sky-700 dark:text-sky-300" : "text-amber-700 dark:text-amber-300")} /> : node.cancelled ? <X className="size-3.5" /> : node.resolved ? <Check className="size-3.5 text-primary" /> : card?.blocked ? <LockKeyhole className="size-3.5 text-amber-600" /> : <Bot className="size-3.5" />}
                         <span className={cn("font-semibold", question?.kind === "engineering" && "text-sky-800 dark:text-sky-200", question?.kind === "business" && "text-amber-800 dark:text-amber-200")}>{question ? question.kind === "engineering" ? "Engineering" : "Business" : "Task"}</span>
