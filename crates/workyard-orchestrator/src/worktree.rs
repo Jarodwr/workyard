@@ -7,7 +7,8 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub fn branch_for(card_key: &str) -> String {
     format!("workyard/{}", card_key.to_lowercase())
@@ -54,14 +55,74 @@ fn exclude_workyard_dir(main: &Path) -> io::Result<()> {
     std::fs::write(&exclude, format!("{existing}{separator}.workyard/\n"))
 }
 
+/// A repository may declare this script; it runs once, from the new worktree's root, to restore
+/// what git ignores (dependency directories, staged binaries) that a bare checkout lacks.
+pub const SETUP_SCRIPT: &str = "scripts/worktree-setup.sh";
+const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run the repository's optional setup script in a freshly created worktree with
+/// `WORKYARD_MAIN_CHECKOUT` and `WORKYARD_CARD` set. `Ok(())` when there is no script or it
+/// succeeded; `Err` describes a failure or timeout.
+fn run_setup(main: &Path, worktree: &Path, card_key: &str, timeout: Duration) -> Result<(), String> {
+    if !worktree.join(SETUP_SCRIPT).is_file() {
+        return Ok(());
+    }
+    let mut child = Command::new("sh")
+        .arg(SETUP_SCRIPT)
+        .current_dir(worktree)
+        .env("WORKYARD_MAIN_CHECKOUT", main)
+        .env("WORKYARD_CARD", card_key)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not start {SETUP_SCRIPT}: {e}"))?;
+    // Drain stderr on a thread so a chatty script cannot block on a full pipe.
+    let mut stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(pipe) = stderr.as_mut() {
+            let _ = io::Read::read_to_string(pipe, &mut text);
+        }
+        text
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(format!("{SETUP_SCRIPT} timed out after {}s", timeout.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => break Err(e),
+        }
+    };
+    let text = reader.join().unwrap_or_default();
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("{SETUP_SCRIPT} failed ({status}): {}", text.trim())),
+        Err(e) => Err(format!("{SETUP_SCRIPT}: {e}")),
+    }
+}
+
 /// Make sure the card's worktree exists and return its path. An existing one (a resumed
 /// session, or a card handed to a fresh worker) is reused as it is, with its branch and
 /// uncommitted files; a missing one is added on `workyard/<key>`, branching from the main
 /// checkout's current commit, or from the existing branch if the card has been here before.
+/// A newly created worktree runs the repository's `scripts/worktree-setup.sh`, if it has one;
+/// a failure there is logged and never stops the worker.
 pub fn ensure_worktree(main: &Path, card_key: &str) -> io::Result<PathBuf> {
+    ensure_worktree_noting(main, card_key).map(|(path, _)| path)
+}
+
+/// Like [`ensure_worktree`], also returning the setup failure (if any) so a caller can note it.
+pub fn ensure_worktree_noting(main: &Path, card_key: &str) -> io::Result<(PathBuf, Option<String>)> {
     let path = worktree_path(main, card_key);
     if path.join(".git").exists() {
-        return Ok(path);
+        return Ok((path, None));
     }
     exclude_workyard_dir(main)?;
     let _ = git(main, &["worktree", "prune"]);
@@ -79,7 +140,11 @@ pub fn ensure_worktree(main: &Path, card_key: &str) -> io::Result<PathBuf> {
     if !ok {
         return Err(failed(&format!("could not create the worktree for {card_key}"), err));
     }
-    Ok(path)
+    let note = run_setup(main, &path, card_key, SETUP_TIMEOUT).err();
+    if let Some(note) = &note {
+        eprintln!("{card_key}: worktree setup: {note}");
+    }
+    Ok((path, note))
 }
 
 #[cfg(test)]
@@ -142,6 +207,51 @@ mod tests {
         assert!(git(&path, &["commit", "-q", "-m", "work"]).unwrap().0);
         assert!(git(&main, &["merge", "--ff-only", "workyard/c-6"]).unwrap().0);
         assert!(main.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    /// Commit a setup script into the repository so new worktrees check it out.
+    fn commit_setup(main: &Path, body: &str) {
+        std::fs::create_dir_all(main.join("scripts")).unwrap();
+        std::fs::write(main.join(SETUP_SCRIPT), body).unwrap();
+        assert!(git(main, &["add", "-A"]).unwrap().0);
+        assert!(git(main, &["commit", "-q", "-m", "setup"]).unwrap().0);
+    }
+
+    #[test]
+    fn a_new_worktree_runs_the_setup_script_once_with_its_environment() {
+        let main = repo();
+        commit_setup(&main, "echo \"$WORKYARD_CARD $WORKYARD_MAIN_CHECKOUT\" >> setup-marker\n");
+        let (path, note) = ensure_worktree_noting(&main, "C-7").unwrap();
+        assert_eq!(note, None);
+        let marker = std::fs::read_to_string(path.join("setup-marker")).unwrap();
+        assert_eq!(marker.trim(), format!("C-7 {}", main.display()));
+        // Reuse does not run it again.
+        ensure_worktree(&main, "C-7").unwrap();
+        let marker = std::fs::read_to_string(path.join("setup-marker")).unwrap();
+        assert_eq!(marker.lines().count(), 1);
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn a_failing_setup_script_is_reported_but_the_worktree_is_still_returned() {
+        let main = repo();
+        commit_setup(&main, "echo broken >&2\nexit 3\n");
+        let (path, note) = ensure_worktree_noting(&main, "C-8").unwrap();
+        assert!(path.join(".git").exists());
+        let note = note.expect("failure is reported");
+        assert!(note.contains("broken"), "{note}");
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn a_setup_script_that_hangs_is_stopped() {
+        let main = repo();
+        let path = ensure_worktree(&main, "C-9").unwrap();
+        std::fs::create_dir_all(path.join("scripts")).unwrap();
+        std::fs::write(path.join(SETUP_SCRIPT), "sleep 30\n").unwrap();
+        let err = run_setup(&main, &path, "C-9", Duration::from_millis(200)).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
         let _ = std::fs::remove_dir_all(&main);
     }
 
