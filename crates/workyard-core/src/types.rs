@@ -272,6 +272,8 @@ pub struct Card {
     pub blocked: bool,
     pub blockers: Vec<Blocker>,
     pub finish_blockers: Vec<Blocker>,
+    /// Cancelled prerequisites, kept for history; they do not block.
+    pub cancelled_prerequisites: Vec<Blocker>,
     pub review_gates: Vec<ReviewGate>,
     pub can_finish: bool,
     pub ready: bool,

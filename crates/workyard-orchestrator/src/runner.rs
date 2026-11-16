@@ -33,6 +33,8 @@ pub struct Launch {
     /// runtime keeps such a grant only in the process that was asked, so a respawned worker is
     /// given them again.
     pub allow_rules: Vec<String>,
+    /// Extra environment variables for the worker process (a shared `CARGO_TARGET_DIR`, say).
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// A tool the runtime asked the host to approve before running it. The worker waits for the

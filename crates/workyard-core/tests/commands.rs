@@ -338,7 +338,7 @@ fn v7_database_gets_phases_and_preserves_existing_work() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        20
+        21
     );
 }
 
@@ -597,65 +597,32 @@ fn next_phase_work_starts_only_when_current_queue_is_exhausted() {
 }
 
 #[test]
-fn cancelled_prerequisite_requires_replanning_before_phase_advance() {
+fn cancelled_prerequisite_stops_blocking_and_stays_visible() {
     let (_dir, store, board) = setup();
     store.add_phase("agent", &board, "Next").unwrap();
     let obsolete = store
         .create_card("agent", &board, "Obsolete", "", "P2", None)
         .unwrap();
     let later = store
-        .create_card_in_phase(
-            "agent",
-            &board,
-            "Dependent",
-            "",
-            "P2",
-            None,
-            "",
-            Some("Next"),
-        )
+        .create_card_in_phase("agent", &board, "Dependent", "", "P2", None, "", Some("Next"))
         .unwrap();
-    store
-        .add_dependency(
-            "agent",
-            later["key"].as_str().unwrap(),
-            obsolete["key"].as_str().unwrap(),
-            1,
-        )
-        .unwrap();
+    let (obs, dep) = (obsolete["key"].as_str().unwrap(), later["key"].as_str().unwrap());
+    store.add_dependency("agent", dep, obs, 1).unwrap();
+    assert_eq!(store.view_card(dep).unwrap()["blocked"], true);
     let before_cancel = store.latest_event_id().unwrap();
-    let cancelled = store
-        .cancel_card(
-            "agent",
-            obsolete["key"].as_str().unwrap(),
-            "No longer needed",
-            1,
-        )
-        .unwrap();
+    let cancelled = store.cancel_card("agent", obs, "No longer needed", 1).unwrap();
     assert_eq!(store.latest_event_id().unwrap(), before_cancel + 1);
     assert_eq!(cancelled["cancellation_reason"], "No longer needed");
-    let before_failed_advance = store.latest_event_id().unwrap();
-    assert_eq!(
-        store.advance_phase("agent", &board).unwrap_err().code,
-        "phase_incomplete"
-    );
-    assert_eq!(store.latest_event_id().unwrap(), before_failed_advance);
-    assert_eq!(
-        store.view_card(later["key"].as_str().unwrap()).unwrap()["blocked"],
-        true
-    );
-    assert_eq!(
-        store.view_card(later["key"].as_str().unwrap()).unwrap()["blockers"][0]["cancelled"],
-        true
-    );
-    store
-        .remove_dependency(
-            "agent",
-            later["key"].as_str().unwrap(),
-            obsolete["key"].as_str().unwrap(),
-            2,
-        )
-        .unwrap();
+    let event = store.poll_events(before_cancel, 10).unwrap();
+    let effects = event["events"][0]["effects"].as_array().unwrap();
+    assert!(effects.iter().any(|e| e["type"] == "card_became_ready" && e["card_key"] == dep));
+    let view = store.view_card(dep).unwrap();
+    assert_eq!(view["blocked"], false);
+    assert_eq!(view["can_finish"], true);
+    assert_eq!(view["blockers"].as_array().unwrap().len(), 0);
+    assert_eq!(view["cancelled_prerequisites"][0]["key"], obs);
+    assert_eq!(view["cancelled_prerequisites"][0]["cancelled"], true);
+    // The phase can close without repairing the link.
     let board_after = store.advance_phase("agent", &board).unwrap();
     assert_eq!(
         board_after["current_phase_id"],
@@ -861,7 +828,7 @@ fn existing_v1_database_migrates_to_agent_types_and_notes() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 20);
+    assert_eq!(version, 21);
 }
 
 #[test]
@@ -2007,7 +1974,7 @@ fn supervisor_limits_are_enforced_in_the_core() {
 /// Put the database back to schema 17, as an older binary leaves it: no version on the lease.
 fn downgrade_to_17(dir: &TempDir) {
     let db = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
-    db.execute_batch("ALTER TABLE orchestrator_sessions DROP COLUMN binary_version; ALTER TABLE orchestrator_sessions DROP COLUMN schema_version; DELETE FROM schema_version WHERE version>=18; DROP TABLE card_reports; ALTER TABLE boards DROP COLUMN integration; PRAGMA user_version = 17").unwrap();
+    db.execute_batch("ALTER TABLE orchestrator_sessions DROP COLUMN binary_version; ALTER TABLE orchestrator_sessions DROP COLUMN schema_version; DELETE FROM schema_version WHERE version>=18; DROP TABLE card_reports; ALTER TABLE orchestrator_sessions DROP COLUMN worker_env_keys; ALTER TABLE boards DROP COLUMN worker_env; ALTER TABLE boards DROP COLUMN integration; PRAGMA user_version = 17").unwrap();
 }
 
 #[test]
@@ -2015,7 +1982,7 @@ fn lease_records_the_binary_version_and_release_clears_it() {
     let (_dir, store, board) = setup();
     let lease = store.orchestrator_acquire(&board, "run", "h", None, 30, None).unwrap();
     assert_eq!(lease["binary_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(lease["schema_version"], 20);
+    assert_eq!(lease["schema_version"], 21);
     let released = store.orchestrator_release(lease["actor"].as_str().unwrap(), &board).unwrap();
     assert!(released["schema_version"].is_null());
 }
@@ -2048,6 +2015,24 @@ fn migration_proceeds_when_the_older_lease_is_released_or_dead() {
     store.orchestrator_acquire(&board, "run", "h", Some(999_999_999), 300, None).unwrap();
     downgrade_to_17(&dir);
     store.list_boards().unwrap();
+}
+
+#[test]
+fn board_worker_env_stores_values_but_reports_and_records_names_only() {
+    let (_dir, store, board) = setup();
+    let pairs = vec![workyard_core::parse_env_pair("CARGO_TARGET_DIR=/tmp/shared").unwrap(), workyard_core::parse_env_pair("X=a=b").unwrap()];
+    let result = store.set_board_worker_env("agent", &board, &pairs, &[]).unwrap();
+    assert_eq!(result["worker_env_keys"], json!(["CARGO_TARGET_DIR", "X"]));
+    assert_eq!(store.board_worker_env(&board).unwrap()["X"], "a=b");
+    store.set_board_worker_env("agent", &board, &[], &["X".to_owned()]).unwrap();
+    assert_eq!(store.board_worker_env(&board).unwrap().len(), 1);
+    let status = store.orchestrator_status(&board).unwrap();
+    assert_eq!(status["board_worker_env_keys"], json!(["CARGO_TARGET_DIR"]));
+    let events = store.poll_events(0, 1000).unwrap().to_string();
+    assert!(events.contains("board_worker_env_changed") && !events.contains("/tmp/shared"));
+    for bad in ["NOEQUALS", "1A=x", "A-B=x", "WORKYARD_DB=x", "=x"] {
+        assert_eq!(workyard_core::parse_env_pair(bad).unwrap_err().code, "validation_error", "{bad}");
+    }
 }
 
 #[test]
