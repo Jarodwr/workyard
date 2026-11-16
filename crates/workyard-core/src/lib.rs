@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+mod actor_policy;
 mod orchestrator;
 pub use orchestrator::DEFAULT_LEASE_SECONDS;
 mod phases;
@@ -769,6 +770,9 @@ impl Store {
         force_reason: Option<&str>,
     ) -> Result<Value> {
         let expected: Option<i64> = expected.into();
+        if force_reason.is_some() {
+            actor_policy::forbid_supervisor(actor, "force-release a card")?;
+        }
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
@@ -837,6 +841,7 @@ impl Store {
         expected: i64,
         new_owner: &str,
     ) -> Result<Value> {
+        actor_policy::forbid_supervisor(actor, "transfer a card")?;
         require_nonblank("new owner", new_owner)?;
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -901,6 +906,7 @@ impl Store {
     }
 
     pub(crate) fn move_card_tx(tx: &Transaction, actor: &str, card: &str, destination: &str, position: Option<i64>, expected: Option<i64>) -> Result<Value> {
+        actor_policy::forbid_supervisor(actor, "move a card between lanes")?;
         let id = resolve_card(&tx, card)?;
         let before = guard_card(&tx, &id, actor, expected)?;
         let board_id = before["board_id"].as_str().unwrap();
@@ -1443,6 +1449,7 @@ impl Store {
         let before = question_row(&tx, &id)?;
         check_version(&before, expected)?;
         let question: Question = serde_json::from_value(before.clone())?;
+        actor_policy::check_supervisor_answer(actor, &question, answer, dropped)?;
         if question.status != QuestionStatus::Open {
             return Err(Error::new("validation_error", "question is no longer open"));
         }

@@ -1905,3 +1905,39 @@ fn schema_too_new_names_both_versions_and_says_what_to_do() {
     assert_eq!(details["database_schema_version"], 999);
     assert!(details["binary_schema_version"].as_i64().unwrap() < 999);
 }
+
+#[test]
+fn supervisor_limits_are_enforced_in_the_core() {
+    let (_dir, store, board) = setup();
+    let sup = format!("agent:supervisor-{board}");
+    let card = store.create_card("cli", &board, "Work", "", "P2", None).unwrap();
+    let key = card["key"].as_str().unwrap();
+    let code = |r: workyard_core::Result<serde_json::Value>| r.unwrap_err().code;
+
+    // Lane moves, cancel and transfer are refused; force release too.
+    assert_eq!(code(store.move_card(&sup, key, "In Progress", None, 1)), "forbidden_for_supervisor");
+    assert_eq!(code(store.cancel_card(&sup, key, "no", 1)), "forbidden_for_supervisor");
+    assert_eq!(code(store.transfer_card(&sup, key, 1, "agent:x")), "forbidden_for_supervisor");
+    assert_eq!(code(store.release_card(&sup, key, 1, Some("stuck"))), "forbidden_for_supervisor");
+    assert_eq!(code(store.approve_card_change(&sup, "nope", "Alex", 1)), "forbidden_for_supervisor");
+    let err = store.move_card(&sup, key, "Done", None, 1).unwrap_err();
+    assert!(err.hint.is_some());
+    assert_eq!(store.view_card(key).unwrap()["version"], 1);
+
+    // Notes and reads keep working.
+    store.add_card_note(&sup, key, "steer").unwrap();
+    store.view_card(key).unwrap();
+
+    // Questions: only engineering with a recommendation, answered with exactly it.
+    let opts = ["A".to_owned(), "B".to_owned()];
+    let biz = store.raise_question("agent:one", &board, "business", "Biz?", "", &opts, "A", "r", &[]).unwrap();
+    let eng = store.raise_question("agent:one", &board, "engineering", "Eng?", "", &opts, "A", "r", &[]).unwrap();
+    let k = |q: &serde_json::Value| q["key"].as_str().unwrap().to_owned();
+    assert_eq!(code(store.resolve_question(&sup, &k(&biz), "A", None, 1, false)), "forbidden_for_supervisor");
+    assert_eq!(code(store.resolve_question(&sup, &k(&eng), "B", None, 1, false)), "forbidden_for_supervisor");
+    assert_eq!(code(store.resolve_question(&sup, &k(&eng), "A", None, 1, true)), "forbidden_for_supervisor");
+    let done = store.resolve_question(&sup, &k(&eng), "A", None, 1, false).unwrap();
+    assert_eq!(done["status"], "answered");
+    // A human is unaffected.
+    store.resolve_question("ui", &k(&biz), "B", None, 1, false).unwrap();
+}
