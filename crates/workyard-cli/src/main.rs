@@ -989,6 +989,24 @@ fn find_plugin_dir() -> Option<PathBuf> {
     exe.ancestors().map(|dir| dir.join("plugin")).find(is_plugin)
 }
 
+/// Copies this executable to `<db>.bin/workyard` (only when it differs) so that rebuilding the
+/// running binary does not change the `workyard` workers see. Returns the directory.
+fn stable_cli_copy(db: &std::path::Path) -> std::io::Result<PathBuf> {
+    let mut dir = db.to_path_buf().into_os_string();
+    dir.push(".bin");
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir)?;
+    let exe = std::env::current_exe()?;
+    let target = dir.join("workyard");
+    if std::fs::read(&exe)? != std::fs::read(&target).unwrap_or_default() {
+        // Write beside it and rename, so a worker never execs a half-written file.
+        let temp = dir.join(format!("workyard.{}.tmp", std::process::id()));
+        std::fs::copy(&exe, &temp)?;
+        std::fs::rename(&temp, &target)?;
+    }
+    Ok(dir)
+}
+
 fn run_orchestrator(
     store: &Store,
     board: &str,
@@ -1012,12 +1030,16 @@ fn run_orchestrator(
     } else {
         eprintln!("warning: no Workyard plugin found; workers will not have its skill (pass --plugin-dir)");
     }
+    let bin_dir = stable_cli_copy(&db)
+        .map_err(|e| eprintln!("warning: no stable copy of workyard for workers: {e}"))
+        .ok();
     let runner = ClaudeRunner {
         bin: claude_bin,
         args,
         db,
         cwd,
         log_dir: PathBuf::from(log_dir),
+        bin_dir,
     };
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
