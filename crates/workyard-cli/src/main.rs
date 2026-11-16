@@ -280,6 +280,9 @@ enum PlanCommand {
         /// `on` or `off`
         setting: ReviewSetting,
     },
+    /// How many phases past the current one workers may be dispatched from: a number, or
+    /// `all` (the default). 1 offers the next phase only once the current one has no ready work.
+    BoardPhaseWindow { board: String, window: String },
     AttachBoard {
         board: String,
         project: String,
@@ -823,6 +826,10 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
         }
         PlanCommand::BoardReview { board, setting } => {
             store.set_board_review_required(actor, &board, matches!(setting, ReviewSetting::On))?
+        }
+        PlanCommand::BoardPhaseWindow { board, window } => {
+            let window = workyard_core::parse_phase_window(&window)?;
+            store.set_board_phase_window(actor, &board, window)?
         }
         PlanCommand::AttachBoard {
             board,

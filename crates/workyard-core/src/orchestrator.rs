@@ -154,7 +154,12 @@ impl Store {
     pub fn orchestrator_status(&self, board: &str) -> Result<Value> {
         let db = self.open()?;
         let board_id = resolve_board(&db, board)?;
-        session_row(&db, &board_id)
+        let mut row = session_row(&db, &board_id)?;
+        let held = crate::phases::held_back_by_phase(&db, &board_id)?;
+        row["phase_window"] = crate::phases::phase_window(&db, &board_id)?.into();
+        row["held_back_by_phase"] = json!(held.len());
+        row["held_back_cards"] = json!(held);
+        Ok(row)
     }
 
     /// Take the board's lease. Check and claim happen in one immediate transaction, so two
