@@ -156,14 +156,14 @@ impl<'a> Orchestrator<'a> {
             self.store.orchestrator_set_permissions(&actor, &self.board, &self.opts.permissions),
             &self.board,
         );
-        // Requests left by a previous orchestrator have no worker waiting on them.
-        self.expire_permission_requests(&actor, None);
         // The first run on a board starts from now rather than replaying its whole history.
         self.cursor = lease["cursor"].as_i64().unwrap_or(0);
         if self.cursor == 0 {
             self.cursor = self.store.latest_event_id().unwrap_or(0);
             let _ = self.store.orchestrator_set_cursor(&actor, &self.board, self.cursor);
         }
+        // Requests left by a previous orchestrator have no worker waiting on them.
+        self.expire_permission_requests(&actor, None);
         let result = self.main_loop(&actor, stop);
         self.shutdown(&actor);
         result
