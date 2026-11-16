@@ -88,7 +88,7 @@ export const api = {
   unassignQuestionStakeholder: (question: Question) => invoke<Question>("unassign_question_stakeholder", { question: question.key, expectedVersion: question.version }),
   openInTerminal: (card: string) => invoke<TaskSession>("open_in_terminal", { card }),
   openPlanner: (board: string) => invoke<{ board: string }>("open_planner", { board }),
-  startOrchestrator: (board: string) => invoke<Orchestrator>("start_orchestrator", { board }),
+  startOrchestrator: (board: string) => invoke<Orchestrator>("start_orchestrator", { board, supervisor: getSupervisorPreference(board) }),
   stopOrchestrator: (board: string) => invoke<Orchestrator>("stop_orchestrator", { board }),
   releaseSessionHold: (card: string) => invoke<TaskSession>("release_session_hold", { card }),
   holdSession: (card: string) => invoke<TaskSession>("hold_session", { card }),
@@ -151,6 +151,14 @@ function demoFindCard(id: string): Card {
 }
 function demoEvent(type: string, entityId: string) {
   demoEvents.push({ id: demoEvents.length + 1, type, board_id: demoBoard.id, entity_type: "card", entity_id: entityId, effects: [] });
+}
+const supervisorKey = (board: string) => `workyard.supervisor.${board}`;
+/** Whether to start the board's orchestrator with `--supervisor`; kept per board in the browser. */
+export function getSupervisorPreference(board: string): boolean {
+  try { return localStorage.getItem(supervisorKey(board)) === "1"; } catch { return false; }
+}
+export function setSupervisorPreference(board: string, on: boolean) {
+  try { localStorage.setItem(supervisorKey(board), on ? "1" : "0"); } catch { /* storage unavailable: the choice lasts until reload */ }
 }
 const demoApi = {
   openInTerminal: async (_card: string): Promise<TaskSession> => { throw new Error("Opening a terminal needs the desktop app"); },
