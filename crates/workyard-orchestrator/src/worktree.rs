@@ -93,7 +93,7 @@ fn run_setup(main: &Path, worktree: &Path, card_key: &str, timeout: Duration) ->
             Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = reader.join();
+                // A grandchild may still hold the pipe open; do not wait for it.
                 return Err(format!("{SETUP_SCRIPT} timed out after {}s", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
