@@ -178,11 +178,39 @@ fn a_session_waiting_for_integration_resumes_only_once_the_work_is_on_the_target
 }
 
 #[test]
-fn waiting_for_one_thing_at_a_time() {
+fn a_pause_with_several_waits_resumes_only_when_all_hold() {
     let w = world();
+    w.branch_with_commit("feature", "a.txt");
     let (key, _) = w.working_card("Feature", "feature", false);
-    let err = w.store.pause_task_session_waiting("agent:w", &key, None, true, true).unwrap_err();
-    assert_eq!(err.code, "validation_error");
+    let q = w.store.raise_question("agent:w", &w.board, "engineering", "Which way?", "", &["A".into(), "B".into()], "A", "Simpler", &[]).unwrap();
+    let qkey = q["key"].as_str().unwrap().to_owned();
+    let paused = w.store.pause_task_session_waiting("agent:w", &key, Some(&qkey), false, true).unwrap();
+    assert_eq!(paused["waiting_integration"], true);
+    assert_eq!(paused["waiting_question_key"], qkey.as_str());
+    // Neither condition holds.
+    assert!(w.store.next_ready_task(&w.board, None).unwrap().is_null());
+    // The answer alone is not enough...
+    w.store.resolve_question("human", &qkey, "A", None, 1, false).unwrap();
+    assert!(w.store.next_ready_task(&w.board, None).unwrap().is_null());
+    assert_eq!(w.store.resume_task_session("orchestrator", &key).unwrap_err().code, "session_not_ready");
+    // ...and the merge completes it.
+    git(&w.repo_path, &["merge", "--ff-only", "-q", "feature"]);
+    assert_eq!(w.store.next_ready_task(&w.board, None).unwrap()["dispatch_action"], "resume");
+    w.store.resume_task_session("orchestrator", &key).unwrap();
+}
+
+#[test]
+fn a_merge_before_the_answer_still_waits_for_the_answer() {
+    let w = world();
+    w.branch_with_commit("feature", "a.txt");
+    let (key, _) = w.working_card("Feature", "feature", false);
+    let q = w.store.raise_question("agent:w", &w.board, "engineering", "Which way?", "", &["A".into(), "B".into()], "A", "Simpler", &[]).unwrap();
+    let qkey = q["key"].as_str().unwrap().to_owned();
+    w.store.pause_task_session_waiting("agent:w", &key, Some(&qkey), false, true).unwrap();
+    git(&w.repo_path, &["merge", "--ff-only", "-q", "feature"]);
+    assert!(w.store.next_ready_task(&w.board, None).unwrap().is_null());
+    w.store.resolve_question("human", &qkey, "A", None, 1, false).unwrap();
+    assert_eq!(w.store.next_ready_task(&w.board, None).unwrap()["dispatch_action"], "resume");
 }
 
 #[test]

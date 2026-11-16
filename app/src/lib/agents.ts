@@ -56,3 +56,27 @@ export function elapsed(iso: string | null | undefined, now = Date.now()): strin
   if (minutes < 60) return `${minutes}m`;
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
+
+/** Highest value an estimate can show, so it never reads as finished. */
+export const ESTIMATE_CAP = 90;
+
+/**
+ * A guess at progress from effort so far: it rises with tool uses and run time, slows as it
+ * climbs, and never passes ESTIMATE_CAP.
+ */
+export function estimateProgress(toolUses: number, elapsedSecs: number): number {
+  const effort = Math.max(0, toolUses) / 40 + Math.max(0, elapsedSecs) / 900;
+  return Math.min(ESTIMATE_CAP, Math.floor(ESTIMATE_CAP * (1 - Math.exp(-effort))));
+}
+
+/**
+ * The bar a card should show: reported progress when there is any, else an estimate while the
+ * agent is running, else nothing estimated.
+ */
+export function progressDisplay(card: Card, now = Date.now()): { value: number; estimated: boolean } {
+  if (card.progress > 0 || !isRunning(card)) return { value: card.progress, estimated: false };
+  const session = card.session!;
+  const attached = session.attached_at ? Date.parse(session.attached_at) : NaN;
+  const secs = Number.isNaN(attached) ? session.elapsed_secs ?? 0 : Math.max(0, (now - attached) / 1000);
+  return { value: estimateProgress(session.tool_uses ?? 0, secs), estimated: true };
+}

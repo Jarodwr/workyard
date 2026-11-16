@@ -536,6 +536,8 @@ impl Store {
         reviewer: &str,
         expected: i64,
     ) -> Result<Value> {
+        crate::actor_policy::forbid_supervisor(actor, "approve a change")?;
+        crate::actor_policy::forbid_supervisor(reviewer, "be recorded as a reviewer")?;
         require_nonblank("reviewer", reviewer)?;
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;

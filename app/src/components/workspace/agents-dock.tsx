@@ -3,7 +3,8 @@ import { ChevronDown, ChevronRight, CircleHelp, Clock3, Square, Terminal, Unlock
 import type { Board, Card, Question } from "@/api";
 import { AgentLog } from "@/components/workspace/agent-log";
 import { Button } from "@/components/ui/button";
-import { agentState, boardAgents, elapsed, pendingQuestions, type AgentStateKind } from "@/lib/agents";
+import { agentState, boardAgents, elapsed, pendingQuestions, progressDisplay, type AgentStateKind } from "@/lib/agents";
+import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 
 export const stateTone: Record<AgentStateKind, string> = {
@@ -100,6 +101,15 @@ function AgentRow({ card, now, questions, open, onToggle, onOpenCard, onAnswer, 
             {card.stale && <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-px text-amber-700 dark:text-amber-300" title={`No activity since ${card.last_activity_at ?? "it was claimed"}`}><Clock3 className="size-2.5" />Stale</span>}
             {since && <span className="text-muted-foreground">{state.kind === "running" ? `for ${since}` : `${since} ago`}</span>}
           </span>
+          {state.kind === "running" && (() => {
+            const shown = progressDisplay(card);
+            return (
+              <span className="mt-1 flex items-center gap-1.5" title={shown.estimated ? "Estimated" : undefined}>
+                <Progress value={shown.value} estimated={shown.estimated} className="h-1 flex-1" />
+                <span className="w-7 text-right text-[9px] tabular-nums text-muted-foreground">{shown.estimated ? "~" : ""}{shown.value}%</span>
+              </span>
+            );
+          })()}
           {session.activity && state.kind === "running" && <span className="mt-1 block truncate text-[10.5px] text-muted-foreground" title={session.activity}>{session.activity}</span>}
         </span>
       </button>

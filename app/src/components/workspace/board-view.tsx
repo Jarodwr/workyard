@@ -21,7 +21,7 @@ import { DependencyView } from "@/components/workspace/dependency-view";
 import { Badge } from "@/components/ui/badge";
 import { Card as UiCard } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { boardAgents, isRunning } from "@/lib/agents";
+import { agentState, boardAgents, isRunning, progressDisplay } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -197,13 +197,23 @@ export function BoardView({
                           )}
                         >
                           <UiCard
-                            className="cursor-pointer rounded-lg border-border/90 px-2.5 py-1.5 shadow-sm transition-colors hover:border-primary/40"
+                            data-agent-state={agentState(card)?.kind}
+                            className={cn(
+                              "cursor-pointer rounded-lg border-border/90 px-2.5 py-1.5 shadow-sm transition-colors hover:border-primary/40",
+                              isRunning(card) && "node-running relative",
+                            )}
                             onClick={() => onOpen(card.id)}
                           >
                             <div className="flex items-start gap-1.5">
                               <h3 className="min-w-0 flex-1 line-clamp-2 text-[13px] font-semibold leading-4">
                                 {card.title}
                               </h3>
+                              {isRunning(card) && (
+                                <span className="mt-px inline-flex shrink-0 items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-1.5 py-px text-[9px] font-semibold leading-3 text-primary" title={agentState(card)?.label}>
+                                  <span className="agent-running-dot size-1.5 rounded-full bg-primary" aria-hidden />
+                                  {agentState(card)?.chip}
+                                </span>
+                              )}
                               <AgentTerminalButton card={card} onOpen={onOpenInTerminal} onRelease={onReleaseHold} className="-my-1 -mr-1 shrink-0" />
                               {card.blocking_impact > 0 && (
                                 <Badge variant="outline" className="shrink-0 gap-0.5 border-violet-500/30 bg-violet-500/10 px-1 py-0 text-[9px] leading-4 text-violet-700 dark:text-violet-300" title={`Holds up ${card.blocking_impact} downstream cards`}>
@@ -245,12 +255,15 @@ export function BoardView({
                                 )}
                               </div>
                             )}
-                            <div className="mt-1.5 flex items-center gap-2">
-                              <Progress value={card.progress} className="h-1" />
+                            <div className="mt-1.5 flex items-center gap-2" title={progressDisplay(card).estimated ? "Estimated" : undefined}>
+                              <Progress value={progressDisplay(card).value} estimated={progressDisplay(card).estimated} className="h-1" />
                               <span className="w-7 text-right font-mono text-[10px] tabular-nums text-muted-foreground">
-                                {card.progress}%
+                                {progressDisplay(card).estimated ? "~" : ""}{progressDisplay(card).value}%
                               </span>
                             </div>
+                            {isRunning(card) && card.session?.activity && (
+                              <p className="mt-0.5 truncate text-[10px] text-primary" title={card.session.activity}>{card.session.activity}</p>
+                            )}
                             <AnimatePresence mode="wait">
                               {card.status_note && (
                                 <motion.p

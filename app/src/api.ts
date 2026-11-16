@@ -13,6 +13,9 @@ export type CardSession = {
   activity?: string;
   activity_at?: string | null;
   attached_at?: string | null;
+  /** Tool calls the worker has made this run, and seconds since it attached. */
+  tool_uses?: number;
+  elapsed_secs?: number | null;
   paused_at?: string | null;
 };
 export type Card = {

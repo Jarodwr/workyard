@@ -775,7 +775,7 @@ fn resume_prompt(key: &str, pages: &[Value], ctx: &PromptContext) -> String {
 Re-read it with `workyard --json card {key}`. These board events happened since you last saw it, \
 including any answer to your question:\n{}\n\
 Continue the work. If your work is not on the target branch yet, integrate it first. {}\n\
-If you must wait again, pause (`workyard orch session pause {key} --waiting-question <Q-key>`{} or `--for-integration`) and stop. \
+If you must wait again, pause (`workyard orch session pause {key} --waiting-question <Q-key>`{} or `--for-integration`; flags combine, and you resume only once every one holds) and stop. \
 Do not raise a question for a mechanical blocker; fix it or work around it.",
         serde_json::to_string(&events).unwrap_or_default(),
         integration_steps(key, ctx),
