@@ -448,6 +448,44 @@ enum OrchCommand {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Tools workers asked to use in `--permissions safe`: list them and decide them. Deciding is
+    /// for a human; the supervisor and workers are refused.
+    Perms {
+        #[command(subcommand)]
+        command: PermsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermsCommand {
+    /// List requests on a board, newest first.
+    List {
+        board: String,
+        /// Only requests in this status: pending, allowed_once, allowed_run, denied or expired
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Decide a pending request. The worker carries on at once, without a restart.
+    Decide {
+        /// The request's id (from `orch perms list`)
+        id: String,
+        #[arg(value_enum)]
+        decision: PermsDecision,
+        /// With allow-run, the rule to grant for the rest of the run instead of the default
+        /// (a Bash command's first word, `Bash(touch *)`; any other tool by name)
+        #[arg(long)]
+        rule: Option<String>,
+        /// Shown to the worker when denying
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum PermsDecision {
+    AllowOnce,
+    AllowRun,
+    Deny,
 }
 
 #[derive(Subcommand)]
@@ -900,6 +938,17 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             reason,
             expected_version,
         } => store.release_card(actor, &card, expected_version, Some(&reason))?,
+        OrchCommand::Perms { command } => match command {
+            PermsCommand::List { board, status } => store.permission_requests(&board, status.as_deref())?,
+            PermsCommand::Decide { id, decision, rule, reason } => {
+                let decision = match decision {
+                    PermsDecision::AllowOnce => "allow_once",
+                    PermsDecision::AllowRun => "allow_run",
+                    PermsDecision::Deny => "deny",
+                };
+                store.permission_decide(actor, &id, decision, rule.as_deref(), &reason)?
+            }
+        },
         OrchCommand::Session { command } => match command {
             SessionCommand::Attach { card, runner, session_id } => store.attach_task_session(actor, &card, &runner, &session_id)?,
             SessionCommand::Pause { card, waiting_question, for_review, for_integration } => {
@@ -966,7 +1015,12 @@ fn permission_args(permissions: Permissions, allow: &[String]) -> Vec<String> {
     match permissions {
         Permissions::Full => vec!["--dangerously-skip-permissions".into()],
         Permissions::Safe => {
-            let mut args: Vec<String> = vec!["--permission-mode".into(), "acceptEdits".into(), "--allowedTools".into()];
+            // `--permission-prompt-tool stdio` (hidden in --help) is what makes Claude Code ask the
+            // host, over stdin/stdout, instead of refusing; `--permission-prompts host` alone is not
+            // enough. The orchestrator answers each request once a human has decided it.
+            let mut args: Vec<String> = ["--permission-mode", "acceptEdits", "--permission-prompts", "host", "--permission-prompt-tool", "stdio", "--allowedTools"]
+                .map(String::from)
+                .into();
             args.extend(SAFE_COMMANDS.iter().map(|c| format!("Bash({c}:*)")));
             args.extend(allow.iter().cloned());
             args
@@ -1147,7 +1201,9 @@ mod tests {
     fn full_permissions_turn_checks_off_and_safe_ones_allow_a_list() {
         assert_eq!(permission_args(Permissions::Full, &["Bash(make:*)".into()]), vec!["--dangerously-skip-permissions"]);
         let safe = permission_args(Permissions::Safe, &["Bash(make:*)".into()]);
-        assert_eq!(&safe[..3], ["--permission-mode", "acceptEdits", "--allowedTools"]);
+        assert_eq!(&safe[..2], ["--permission-mode", "acceptEdits"]);
+        assert!(safe.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]), "{safe:?}");
+        assert!(safe.windows(2).any(|w| w == ["--permission-prompts", "host"]), "{safe:?}");
         for tool in ["Bash(workyard:*)", "Bash(git:*)", "Bash(npm:*)", "Bash(cargo:*)", "Bash(python3:*)", "Bash(make:*)"] {
             assert!(safe.iter().any(|a| a == tool), "{tool} missing from {safe:?}");
         }

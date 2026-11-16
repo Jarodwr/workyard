@@ -25,9 +25,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState, Workspace};
+use crate::runner::{LimitHit, Launch, PermissionAnswer, PermissionAsk, Runner, Worker, WorkerState, Workspace};
 use crate::worktree::ensure_worktree;
 
 pub struct ClaudeRunner {
@@ -102,6 +102,10 @@ struct Activity {
     doing: String,
     tools: u32,
     denials: Vec<String>,
+    /// Permission asks not yet handed to the engine, and the input of every ask still waiting
+    /// (an allow must send the original input back).
+    asks: Vec<PermissionAsk>,
+    waiting: std::collections::HashMap<String, Value>,
 }
 
 /// What one stream-json line tells us about the worker's current activity.
@@ -112,6 +116,8 @@ pub enum Observed {
     Thinking,
     /// A tool request the runtime refused.
     Denied(String),
+    /// The runtime asks the host whether a tool may run, and waits.
+    Ask(PermissionAsk),
     /// The worker finished a turn.
     TurnDone,
 }
@@ -180,9 +186,62 @@ pub fn observe(line: &Value) -> Vec<Observed> {
             }
         }
         "result" => seen.push(Observed::TurnDone),
+        "system" if line["subtype"] == "permission_denied" => {
+            let tool = line["tool_name"].as_str().unwrap_or("a tool");
+            let message = line["message"].as_str().unwrap_or("needs approval");
+            seen.push(Observed::Denied(clip(&format!("{tool}: {message}"), 140)));
+        }
+        "control_request" if line["request"]["subtype"] == "can_use_tool" => {
+            let request = &line["request"];
+            if let Some(request_id) = line["request_id"].as_str() {
+                let tool_name = request["tool_name"].as_str().unwrap_or("tool");
+                seen.push(Observed::Ask(PermissionAsk {
+                    request_id: request_id.to_owned(),
+                    tool_use_id: request["tool_use_id"].as_str().unwrap_or_default().to_owned(),
+                    tool_name: tool_name.to_owned(),
+                    input: request["input"].clone(),
+                    description: request["description"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| describe_tool(tool_name, &request["input"])),
+                }));
+            }
+        }
         _ => {}
     }
     seen
+}
+
+/// Split a rule such as `Bash(touch *)` into the tool name and its content (`None` for a bare
+/// tool name).
+fn parse_rule(rule: &str) -> (String, Option<String>) {
+    match rule.trim().split_once('(') {
+        Some((tool, rest)) => (tool.trim().to_owned(), Some(rest.trim_end_matches(')').to_owned())),
+        None => (rule.trim().to_owned(), None),
+    }
+}
+
+/// The `control_response` line that answers a request. An allow echoes the original input; a
+/// rule is granted with destination `session`, so it lasts for this worker process only and is
+/// never written to a settings file.
+pub fn permission_response(request_id: &str, input: &Value, answer: &PermissionAnswer) -> Value {
+    let response = match answer {
+        PermissionAnswer::Allow { rule } => {
+            let mut allow = json!({"behavior": "allow", "updatedInput": input});
+            if let Some(rule) = rule {
+                let (tool, content) = parse_rule(rule);
+                let mut entry = json!({"toolName": tool});
+                if let Some(content) = content {
+                    entry["ruleContent"] = json!(content);
+                }
+                allow["updatedPermissions"] =
+                    json!([{"type": "addRules", "rules": [entry], "behavior": "allow", "destination": "session"}]);
+            }
+            allow
+        }
+        PermissionAnswer::Deny { message } => json!({"behavior": "deny", "message": message}),
+    };
+    json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}})
 }
 
 fn apply(activity: &mut Activity, seen: Vec<Observed>) {
@@ -194,6 +253,11 @@ fn apply(activity: &mut Activity, seen: Vec<Observed>) {
             }
             Observed::Thinking => activity.doing = "thinking".into(),
             Observed::Denied(text) => activity.denials.push(text),
+            Observed::Ask(ask) => {
+                activity.doing = format!("waiting for approval: {}", describe_tool(&ask.tool_name, &ask.input));
+                activity.waiting.insert(ask.request_id.clone(), ask.input.clone());
+                activity.asks.push(ask);
+            }
             Observed::TurnDone => activity.doing = "idle".into(),
         }
     }
@@ -276,6 +340,30 @@ impl Worker for ChildWorker {
     fn take_denials(&mut self) -> Vec<String> {
         self.activity.lock().map(|mut a| std::mem::take(&mut a.denials)).unwrap_or_default()
     }
+
+    fn take_permission_asks(&mut self) -> Vec<PermissionAsk> {
+        self.activity.lock().map(|mut a| std::mem::take(&mut a.asks)).unwrap_or_default()
+    }
+
+    fn answer_permission(&mut self, request_id: &str, answer: &PermissionAnswer) -> std::io::Result<()> {
+        let input = self
+            .activity
+            .lock()
+            .ok()
+            .and_then(|mut a| a.waiting.remove(request_id))
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such request is waiting"))?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "input closed"))?;
+        writeln!(stdin, "{}", permission_response(request_id, &input, answer))?;
+        stdin.flush()?;
+        if let Ok(mut a) = self.activity.lock() {
+            a.doing = "working".into();
+            a.last_event = Instant::now();
+        }
+        Ok(())
+    }
 }
 
 fn write_user_message(stdin: &mut ChildStdin, text: &str) -> std::io::Result<()> {
@@ -319,6 +407,7 @@ impl Runner for ClaudeRunner {
             .arg(if launch.resume { "--resume" } else { "--session-id" })
             .arg(&launch.session_id)
             .args(&self.args)
+            .args(if launch.allow_rules.is_empty() { vec![] } else { ["--allowedTools".to_owned()].into_iter().chain(launch.allow_rules.iter().cloned()).collect() })
             .env("WORKYARD_ACTOR", &launch.actor)
             .env("WORKYARD_DB", &self.db)
             .stdin(Stdio::piped())
@@ -358,6 +447,8 @@ impl Runner for ClaudeRunner {
             doing: String::new(),
             tools: 0,
             denials: Vec::new(),
+            asks: Vec::new(),
+            waiting: std::collections::HashMap::new(),
         }));
         {
             let (limit, done, activity) = (Arc::clone(&limit), Arc::clone(&reader_done), Arc::clone(&activity));
@@ -446,7 +537,7 @@ mod tests {
         let text = json!({"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}});
         assert_eq!(observe(&text), vec![Observed::Thinking]);
         assert_eq!(observe(&json!({"type":"result","subtype":"success"})), vec![Observed::TurnDone]);
-        let mut a = Activity { last_event: Instant::now(), last_was_result: false, doing: String::new(), tools: 0, denials: vec![] };
+        let mut a = Activity { last_event: Instant::now(), last_was_result: false, doing: String::new(), tools: 0, denials: vec![], asks: vec![], waiting: Default::default() };
         apply(&mut a, observe(&edit));
         apply(&mut a, observe(&bash));
         assert_eq!((a.doing.as_str(), a.tools), ("Bash: node --test", 2));
@@ -461,6 +552,35 @@ mod tests {
         // The same words in a successful result (a file that mentions them) are not a denial.
         let fine = json!({"type":"user","message":{"content":[{"type":"tool_result","content":"the docs say it requires approval"}]}});
         assert!(observe(&fine).is_empty());
+    }
+
+    #[test]
+    fn a_can_use_tool_request_is_an_ask_and_other_control_requests_are_not() {
+        // Shape captured in the C-6 investigation (claude 2.1.304).
+        let line = json!({"type":"control_request","request_id":"491dcfcf","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"touch /tmp/a.txt"},"description":"Create empty file a.txt","tool_use_id":"toolu_01"}});
+        let [Observed::Ask(ask)] = observe(&line).as_slice() else { panic!("{:?}", observe(&line)) };
+        assert_eq!((ask.request_id.as_str(), ask.tool_name.as_str(), ask.description.as_str()), ("491dcfcf", "Bash", "Create empty file a.txt"));
+        assert_eq!(ask.input["command"], "touch /tmp/a.txt");
+        assert!(observe(&json!({"type":"control_request","request_id":"x","request":{"subtype":"hook_callback"}})).is_empty());
+        // The runtime refusing outright (the host was not asked) is shown as a denial.
+        let refused = json!({"type":"system","subtype":"permission_denied","tool_name":"Bash","message":"touch needs approval"});
+        assert!(matches!(observe(&refused).as_slice(), [Observed::Denied(t)] if t.contains("touch needs approval")));
+    }
+
+    #[test]
+    fn answers_use_the_verified_wire_format() {
+        let input = json!({"command": "touch a"});
+        let allow = permission_response("r1", &input, &PermissionAnswer::Allow { rule: None });
+        assert_eq!(allow, json!({"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{"behavior":"allow","updatedInput":{"command":"touch a"}}}}));
+        let run = permission_response("r1", &input, &PermissionAnswer::Allow { rule: Some("Bash(touch *)".into()) });
+        assert_eq!(
+            run["response"]["response"]["updatedPermissions"],
+            json!([{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"touch *"}],"behavior":"allow","destination":"session"}])
+        );
+        let tool = permission_response("r1", &input, &PermissionAnswer::Allow { rule: Some("WebFetch".into()) });
+        assert_eq!(tool["response"]["response"]["updatedPermissions"][0]["rules"], json!([{"toolName":"WebFetch"}]));
+        let deny = permission_response("r1", &input, &PermissionAnswer::Deny { message: "no".into() });
+        assert_eq!(deny["response"]["response"], json!({"behavior":"deny","message":"no"}));
     }
 
     #[test]

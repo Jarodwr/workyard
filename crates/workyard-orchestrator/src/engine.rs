@@ -13,7 +13,7 @@ use workyard_core::{DEFAULT_LEASE_SECONDS, Result, Store};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::notify::{Notifier, Silent};
-use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState, Workspace};
+use crate::runner::{LimitHit, Launch, PermissionAnswer, PermissionAsk, Runner, Worker, WorkerState, Workspace};
 use crate::worktree::{branch_for, current_branch, worktree_path};
 
 pub struct Options {
@@ -156,6 +156,8 @@ impl<'a> Orchestrator<'a> {
             self.store.orchestrator_set_permissions(&actor, &self.board, &self.opts.permissions),
             &self.board,
         );
+        // Requests left by a previous orchestrator have no worker waiting on them.
+        self.expire_permission_requests(&actor, None);
         // The first run on a board starts from now rather than replaying its whole history.
         self.cursor = lease["cursor"].as_i64().unwrap_or(0);
         if self.cursor == 0 {
@@ -230,6 +232,7 @@ impl<'a> Orchestrator<'a> {
             .unwrap_or_else(|_| json!([]));
         for (key, ran_for, success, limit) in exited {
             self.live.remove(&key);
+            self.expire_permission_requests(actor, Some(&key));
             self.set_activity(actor, &key, "");
             let session = sessions
                 .as_array()
@@ -403,6 +406,7 @@ impl<'a> Orchestrator<'a> {
             prompt,
             resume,
             workspace,
+            allow_rules: self.store.permission_run_rules(key).unwrap_or_default(),
         };
         match self.runner.start(&launch) {
             Ok(worker) => {
@@ -473,7 +477,7 @@ impl<'a> Orchestrator<'a> {
             let page = self.store.poll_events(self.cursor, 200)?;
             for event in page["events"].as_array().into_iter().flatten() {
                 if event["board_id"] == self.board_id.as_str() {
-                    self.handle_event(event);
+                    self.handle_event(actor, event);
                 }
             }
             let next = page["cursor"].as_i64().unwrap_or(self.cursor);
@@ -514,7 +518,9 @@ impl<'a> Orchestrator<'a> {
     /// "blocked" until the worker does something else.
     fn publish_activity(&mut self, actor: &str) {
         let mut updates = Vec::new();
+        let mut asks = Vec::new();
         for (key, live) in self.live.iter_mut() {
+            asks.extend(live.worker.take_permission_asks().into_iter().map(|ask| (key.clone(), ask)));
             for denial in live.worker.take_denials() {
                 if self.denials_seen.insert(format!("{key}: {denial}")) {
                     self.notifier.notify("Workyard: a tool was refused", &format!("{key}: {denial}"));
@@ -528,6 +534,9 @@ impl<'a> Orchestrator<'a> {
                 updates.push((key.clone(), text, false));
             }
         }
+        for (key, ask) in asks {
+            self.open_permission_request(actor, &key, &ask);
+        }
         for (key, text, urgent) in updates {
             let due = match self.published.get(&key) {
                 Some((last, at)) => *last != text && (urgent || at.elapsed() >= self.opts.activity_interval),
@@ -539,6 +548,62 @@ impl<'a> Orchestrator<'a> {
         }
     }
 
+    /// A worker is waiting for a human to approve a tool: record the request (a human decides
+    /// it with `orch perms decide` or in the desktop app) and say so.
+    fn open_permission_request(&mut self, actor: &str, key: &str, ask: &PermissionAsk) {
+        let opened = self.store.permission_request_open(
+            actor,
+            &self.board,
+            key,
+            &ask.request_id,
+            &ask.tool_use_id,
+            &ask.tool_name,
+            &ask.input,
+            &ask.description,
+        );
+        match opened {
+            Ok(_) => self.notifier.notify("Workyard: a tool needs your approval", &format!("{key}: {}", ask.description)),
+            Err(error) => {
+                // Nobody could decide it, so refuse rather than leave the worker blocked.
+                eprintln!("{key}: {error}");
+                let answer = PermissionAnswer::Deny { message: "Workyard could not record this request".into() };
+                if let Some(live) = self.live.get_mut(key) {
+                    let _ = live.worker.answer_permission(&ask.request_id, &answer);
+                }
+            }
+        }
+    }
+
+    /// A human decided a request: answer the worker that is waiting on it.
+    fn answer_permission(&mut self, request: &Value) {
+        let (Some(key), Some(request_id)) = (request["card_key"].as_str(), request["request_id"].as_str()) else {
+            return;
+        };
+        let answer = match request["status"].as_str() {
+            Some("allowed_once") => PermissionAnswer::Allow { rule: None },
+            Some("allowed_run") => PermissionAnswer::Allow {
+                rule: request["run_rule"].as_str().filter(|r| !r.is_empty()).map(str::to_owned),
+            },
+            Some("denied") => PermissionAnswer::Deny {
+                message: match request["reason"].as_str().filter(|r| !r.is_empty()) {
+                    Some(reason) => format!("Denied by a human: {reason}"),
+                    None => "Denied by a human".into(),
+                },
+            },
+            _ => return,
+        };
+        if let Some(live) = self.live.get_mut(key) {
+            if let Err(error) = live.worker.answer_permission(request_id, &answer) {
+                eprintln!("{key}: could not answer the worker: {error}");
+            }
+        }
+    }
+
+    /// Close requests nobody can answer any more because their worker is gone.
+    fn expire_permission_requests(&self, actor: &str, key: Option<&str>) {
+        self.log_err(self.store.permission_requests_expire(actor, &self.board, key), key.unwrap_or(&self.board));
+    }
+
     fn set_activity(&mut self, actor: &str, key: &str, text: &str) {
         self.published.insert(key.to_owned(), (text.to_owned(), Instant::now()));
         self.log_err(self.store.orchestrator_set_activity(actor, &self.board, key, text), key);
@@ -548,13 +613,14 @@ impl<'a> Orchestrator<'a> {
         self.store.read_card(card_id).ok().map(|card| card.key)
     }
 
-    fn stop_worker(&mut self, key: &str) {
+    fn stop_worker(&mut self, actor: &str, key: &str) {
         if let Some(mut live) = self.live.remove(key) {
             live.worker.stop();
+            self.expire_permission_requests(actor, Some(key));
         }
     }
 
-    fn handle_event(&mut self, event: &Value) {
+    fn handle_event(&mut self, actor: &str, event: &Value) {
         let after = &event["after"];
         let entity = event["entity_id"].as_str().unwrap_or_default();
         match event["type"].as_str().unwrap_or_default() {
@@ -596,13 +662,14 @@ impl<'a> Orchestrator<'a> {
             }
             "card_cancelled" | "card_force_released" | "card_transferred" => {
                 if let Some(key) = self.card_key(entity) {
-                    self.stop_worker(&key);
+                    self.stop_worker(actor, &key);
                 }
             }
+            "permission_decided" => self.answer_permission(after),
             "task_session_held" => {
                 let card_id = event["effects"][0]["card_id"].as_str().unwrap_or_default();
                 if let Some(key) = self.card_key(card_id) {
-                    self.stop_worker(&key);
+                    self.stop_worker(actor, &key);
                 }
             }
             "card_change_linked" | "card_change_updated" => {
@@ -632,6 +699,13 @@ impl<'a> Orchestrator<'a> {
         if let Some(live) = self.supervisor.as_mut() {
             if matches!(live.worker.poll(), WorkerState::Exited { .. }) {
                 self.supervisor = None;
+            } else {
+                // The supervisor has no card and no human to ask: refuse, rather than leave it
+                // blocked on an answer that never comes.
+                for ask in live.worker.take_permission_asks() {
+                    let message = "The supervisor may only use its allowed tools".to_owned();
+                    let _ = live.worker.answer_permission(&ask.request_id, &PermissionAnswer::Deny { message });
+                }
             }
         }
         if self.supervisor.is_none() && self.supervisor_starts < 3 {
@@ -645,6 +719,7 @@ impl<'a> Orchestrator<'a> {
                 prompt: supervisor_prompt(&self.board, &self.opts.permissions),
                 resume: false,
                 workspace: Workspace::None,
+                allow_rules: Vec::new(),
             };
             match self.runner.start(&launch) {
                 Ok(worker) => self.supervisor = Some(Live { worker, started: Instant::now() }),
@@ -676,6 +751,7 @@ impl<'a> Orchestrator<'a> {
         if let Some(mut supervisor) = self.supervisor.take() {
             supervisor.worker.stop();
         }
+        self.expire_permission_requests(actor, None);
         for key in keys {
             // Resumable later; ignore "already paused" or "no session".
             let _ = self.store.pause_task_session(actor, &key, None);
