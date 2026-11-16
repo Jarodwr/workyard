@@ -506,6 +506,15 @@ enum OrchCommand {
         #[arg(long)]
         expected_version: i64,
     },
+    /// Detach a dead or stuck session and return the card to the backlog so a fresh worker
+    /// takes it, keeping its branch and worktree. Refused while the worker is running and was
+    /// active in the last few minutes. Humans and the supervisor may use it.
+    Reclaim {
+        card: String,
+        /// Why the card is being reclaimed (recorded on the event)
+        #[arg(long)]
+        reason: String,
+    },
     ForceRelease {
         card: String,
         #[arg(long)]
@@ -1085,6 +1094,7 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             to_actor,
             expected_version,
         } => store.transfer_card(actor, &card, expected_version, &to_actor)?,
+        OrchCommand::Reclaim { card, reason } => store.reclaim_card(actor, &card, &reason)?,
         OrchCommand::ForceRelease {
             card,
             reason,

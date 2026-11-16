@@ -537,6 +537,72 @@ impl Store {
         Ok(moved)
     }
 
+    /// How recently a worker must have done something for `reclaim` to refuse.
+    const RECLAIM_QUIET_MINUTES: i64 = 5;
+
+    /// Detach a dead or stuck session and return the card to the backlog for a fresh worker.
+    /// For humans and the supervisor. Refuses while the worker is running (its session neither
+    /// paused nor detached) and has been active in the last few minutes. The branch and
+    /// worktree stay.
+    pub fn reclaim_card(&self, actor: &str, card: &str, reason: &str) -> Result<Value> {
+        require_nonblank("reason", reason)?;
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let card_id = resolve_card(&tx, card)?;
+        let before = card_row(&tx, &card_id)?;
+        let board_id = before["board_id"].as_str().unwrap().to_owned();
+        check_board_active(&tx, &board_id)?;
+        if before["cancelled_at"].is_string() {
+            return Err(Error::new("card_cancelled", "cancelled cards cannot be reclaimed"));
+        }
+        let Some(owner) = before["owner_actor"].as_str() else {
+            return Err(Error::new("validation_error", "card is not claimed"));
+        };
+        let lane_kind: String = tx.query_row("SELECT kind FROM lanes WHERE id=?1", [before["lane_id"].as_str().unwrap()], |r| r.get(0))?;
+        if lane_kind != "active" {
+            return Err(Error::new("validation_error", "only an In Progress card can be reclaimed"));
+        }
+        if let Some(session) = crate::sessions::active_session(&tx, &card_id)? {
+            if session["paused_at"].is_null() {
+                let last_event: Option<String> = tx.query_row(
+                    "SELECT MAX(ts) FROM events WHERE entity_id=?1 AND actor=?2",
+                    params![card_id, owner],
+                    |r| r.get(0),
+                )?;
+                let activity_at: Option<String> = tx.query_row(
+                    "SELECT activity_at FROM task_sessions WHERE id=?1",
+                    [session["id"].as_str().unwrap()],
+                    |r| r.get(0),
+                )?;
+                let latest = [session["attached_at"].as_str().map(str::to_owned), last_event, activity_at]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
+                    .max();
+                if let Some(latest) = latest {
+                    let quiet = chrono::Utc::now().signed_duration_since(latest);
+                    if quiet < chrono::Duration::minutes(Self::RECLAIM_QUIET_MINUTES) {
+                        return Err(Error::new(
+                            "worker_active",
+                            format!("the worker on {} was active {}s ago and its session is running", before["key"].as_str().unwrap_or(card), quiet.num_seconds().max(0)),
+                        )
+                        .hint(format!("Wait until it has been quiet for {} minutes, or pause or hold its session first", Self::RECLAIM_QUIET_MINUTES)));
+                    }
+                }
+            }
+        }
+        tx.execute(
+            "UPDATE cards SET owner_actor=NULL,updated_at=?2,version=version+1 WHERE id=?1",
+            params![card_id, now()],
+        )?;
+        crate::sessions::detach_for_card(&tx, &card_id)?;
+        let unowned = card_row(&tx, &card_id)?;
+        let moved = Store::move_card_unchecked_tx(&tx, actor, card, "Backlog", None, unowned["version"].as_i64())?;
+        record(&tx, actor, "card_reclaimed", &board_id, "card", &card_id, Some(&before), Some(&moved), &[], reason)?;
+        self.commit(tx)?;
+        Ok(moved)
+    }
+
     pub fn orchestrator_set_pool(&self, actor: &str, board: &str, size: i64) -> Result<Value> {
         if !(1..=64).contains(&size) {
             return Err(Error::new("validation_error", "pool size must be 1–64"));

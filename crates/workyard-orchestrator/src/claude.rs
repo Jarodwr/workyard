@@ -380,6 +380,10 @@ impl Runner for ClaudeRunner {
         "claude"
     }
 
+    fn log_dir(&self) -> Option<PathBuf> {
+        Some(self.log_dir.clone())
+    }
+
     fn checkout(&self) -> Option<PathBuf> {
         let dir = match &self.cwd {
             Some(dir) => dir.clone(),

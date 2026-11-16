@@ -688,6 +688,7 @@ impl Store {
         priority: Option<&str>,
         agent_type: Option<&str>,
     ) -> Result<Value> {
+        actor_policy::forbid_supervisor(actor, "change a card's title, description, priority or agent type")?;
         if title.is_none() && description.is_none() && priority.is_none() && agent_type.is_none() {
             return Err(Error::new("validation_error", "no fields to update"));
         }
@@ -731,6 +732,7 @@ impl Store {
         workspace: &str,
         expected: impl Into<Option<i64>>,
     ) -> Result<Value> {
+        actor_policy::forbid_supervisor(actor, "change a card's workspace")?;
         if !["worktree", "none"].contains(&workspace) {
             return Err(Error::new("validation_error", "workspace must be worktree or none"));
         }
@@ -958,6 +960,11 @@ impl Store {
 
     pub(crate) fn move_card_tx(tx: &Transaction, actor: &str, card: &str, destination: &str, position: Option<i64>, expected: Option<i64>) -> Result<Value> {
         actor_policy::forbid_supervisor(actor, "move a card between lanes")?;
+        Self::move_card_unchecked_tx(tx, actor, card, destination, position, expected)
+    }
+
+    /// The move itself, without the supervisor policy: for `reclaim`, a sanctioned way back to the backlog.
+    pub(crate) fn move_card_unchecked_tx(tx: &Transaction, actor: &str, card: &str, destination: &str, position: Option<i64>, expected: Option<i64>) -> Result<Value> {
         let id = resolve_card(&tx, card)?;
         let before = guard_card(&tx, &id, actor, expected)?;
         let board_id = before["board_id"].as_str().unwrap();
@@ -1112,6 +1119,7 @@ impl Store {
         scope: &str,
         expected: i64,
     ) -> Result<Value> {
+        actor_policy::forbid_supervisor(actor, "change a card's dependencies")?;
         if !matches!(scope, "start" | "finish") {
             return Err(Error::new(
                 "validation_error",
@@ -1218,6 +1226,7 @@ impl Store {
         target: &str,
         expected: i64,
     ) -> Result<Value> {
+        actor_policy::forbid_supervisor(actor, "change a card's dependencies")?;
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
@@ -1520,7 +1529,7 @@ impl Store {
         let before = question_row(&tx, &id)?;
         check_version(&before, expected)?;
         let question: Question = serde_json::from_value(before.clone())?;
-        actor_policy::check_supervisor_answer(actor, &question, answer, dropped)?;
+        actor_policy::forbid_supervisor(actor, if dropped { "drop a question" } else { "answer a question" })?;
         if question.status != QuestionStatus::Open {
             return Err(Error::new("validation_error", "question is no longer open"));
         }
