@@ -16,6 +16,7 @@ mod orchestrator;
 mod permissions;
 pub use orchestrator::DEFAULT_LEASE_SECONDS;
 mod phases;
+pub use phases::parse_phase_window;
 mod projects;
 mod sessions;
 
@@ -1569,8 +1570,8 @@ impl Store {
         agent_type: Option<&str>,
     ) -> Result<Value> {
         let board_id = board_id.to_owned();
-        let (current_id, current_position) = phases::current_phase(&db, &board_id)?;
-        let mut paused = db.prepare("SELECT c.id FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id JOIN task_sessions s ON s.card_id=c.id AND s.detached_at IS NULL WHERE c.board_id=?1 AND p.position BETWEEN ?2 AND ?2+1 AND l.kind='active' AND c.cancelled_at IS NULL AND c.owner_actor=s.owner_actor AND s.paused_at IS NOT NULL AND (?3 IS NULL OR c.agent_type=?3) ORDER BY p.position,c.position,c.key")?;
+        let (_, current_position) = phases::current_phase(&db, &board_id)?;
+        let mut paused = db.prepare("SELECT c.id FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id JOIN task_sessions s ON s.card_id=c.id AND s.detached_at IS NULL WHERE c.board_id=?1 AND p.position>=?2 AND l.kind='active' AND c.cancelled_at IS NULL AND c.owner_actor=s.owner_actor AND s.paused_at IS NOT NULL AND (?3 IS NULL OR c.agent_type=?3) ORDER BY p.position,c.position,c.key")?;
         let paused_ids = paused.query_map(params![board_id,current_position,agent_type], |row| row.get::<_,String>(0))?;
         let mut best_resume: Option<(i64, Value)> = None;
         for id in paused_ids {
@@ -1587,34 +1588,31 @@ impl Store {
             card["session"] = json!(sessions::active_session(&db, card["id"].as_str().unwrap())?);
             return Ok(card);
         }
-        let selected_phase = if phases::current_queue_has_work(&db, &board_id)? {
-            Some(current_id)
-        } else {
-            db.query_row(
-                "SELECT id FROM phases WHERE board_id=?1 AND position=?2",
-                params![board_id, current_position + 1],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-        };
-        let Some(selected_phase) = selected_phase else {
-            return Ok(Value::Null);
-        };
-        let mut stmt = db.prepare("SELECT c.id FROM cards c JOIN lanes l ON l.id=c.lane_id WHERE c.phase_id=?1 AND l.kind='backlog' AND l.archived=0 AND c.owner_actor IS NULL AND c.cancelled_at IS NULL AND (?2 IS NULL OR c.agent_type=?2) ORDER BY c.position,c.key")?;
-        let ids = stmt.query_map(params![selected_phase, agent_type], |r| {
-            r.get::<_, String>(0)
+        let window = phases::phase_window(&db, &board_id)?;
+        let current_has_work = phases::current_queue_has_work(&db, &board_id)?;
+        let mut stmt = db.prepare("SELECT c.id,p.position FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id WHERE c.board_id=?1 AND p.position>=?2 AND p.closed_at IS NULL AND l.kind='backlog' AND l.archived=0 AND c.owner_actor IS NULL AND c.cancelled_at IS NULL AND (?3 IS NULL OR c.agent_type=?3) ORDER BY p.position,c.position,c.key")?;
+        let ids = stmt.query_map(params![board_id, current_position, agent_type], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;
-        let mut best: Option<Value> = None;
+        let mut best: Option<(i64, Value)> = None;
         for id in ids {
-            let row = card_row(&db, &id?)?;
+            let (id, position) = id?;
+            if !phases::phase_offered(position - current_position, window, current_has_work) {
+                continue;
+            }
+            if best.as_ref().is_some_and(|(best_position, _)| *best_position < position) {
+                break;
+            }
+            let row = card_row(&db, &id)?;
             if row["ready"] == true && row["owner_actor"].is_null() {
-                if best.as_ref().is_none_or(|current| {
+                if best.as_ref().is_none_or(|(_, current)| {
                     row["blocking_impact"].as_i64() > current["blocking_impact"].as_i64()
                 }) {
-                    best = Some(row);
+                    best = Some((position, row));
                 }
             }
         }
+        let best = best.map(|(_, row)| row);
         if let Some(mut card) = best {
             card["dispatch_action"] = json!("claim");
             Ok(card)
@@ -1677,7 +1675,7 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
-pub(crate) const SCHEMA_VERSION: i64 = 17;
+pub(crate) const SCHEMA_VERSION: i64 = 18;
 
 fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -1871,6 +1869,15 @@ fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 17")?;
+        version = 17;
+    }
+    if version == 17 {
+        tx.execute_batch(include_str!("../migrations/018.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (18,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 18")?;
     }
     tx.commit()?;
     Ok(())
@@ -2002,7 +2009,7 @@ fn ensure_work_lane(db: &Connection, lane_id: &str) -> Result<()> {
     }
 }
 fn board_row(db: &Connection, id: &str) -> Result<Value> {
-    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required FROM boards WHERE id=?1", [id], |r| Ok(json!({"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
+    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required,phase_window FROM boards WHERE id=?1", [id], |r| Ok(json!({"phase_window":r.get::<_,Option<i64>>(10)?,"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
 }
 fn card_row(db: &Connection, id: &str) -> Result<Value> {
     Ok(serde_json::to_value(card_snapshot(db, id)?)?)

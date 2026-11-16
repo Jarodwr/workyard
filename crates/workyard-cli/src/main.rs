@@ -284,6 +284,9 @@ enum PlanCommand {
         /// `on` or `off`
         setting: ReviewSetting,
     },
+    /// How many phases past the current one workers may be dispatched from: a number, or
+    /// `all` (the default). 1 offers the next phase only once the current one has no ready work.
+    BoardPhaseWindow { board: String, window: String },
     AttachBoard {
         board: String,
         project: String,
@@ -378,6 +381,10 @@ enum OrchCommand {
         /// Do not send desktop notifications
         #[arg(long)]
         no_notify: bool,
+        /// Keep each card's worktree and branch after it is Done and merged (they are removed
+        /// by default)
+        #[arg(long)]
+        keep_worktrees: bool,
     },
     /// Restart a board's orchestrator on the current binary: drain, wait for workers to pause or
     /// finish, release the lease, then replace this process with `orch run <board> <args>`.
@@ -835,6 +842,10 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
         PlanCommand::BoardReview { board, setting } => {
             store.set_board_review_required(actor, &board, matches!(setting, ReviewSetting::On))?
         }
+        PlanCommand::BoardPhaseWindow { board, window } => {
+            let window = workyard_core::parse_phase_window(&window)?;
+            store.set_board_phase_window(actor, &board, window)?
+        }
         PlanCommand::AttachBoard {
             board,
             project,
@@ -947,7 +958,8 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
             cwd,
             max_failures,
             no_notify,
-        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, supervisor, plugin_dir, cwd, max_failures, !no_notify)?,
+            keep_worktrees,
+        } => run_orchestrator(store, &board, pool, claude_bin, claude_args, permissions, allow, supervisor, plugin_dir, cwd, max_failures, !no_notify, keep_worktrees)?,
         OrchCommand::Restart { board, timeout, run_args } => restart_orchestrator(store, actor, &board, timeout, &run_args)?,
         OrchCommand::Status { board } => store.orchestrator_status(&board)?,
         OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
@@ -1129,6 +1141,7 @@ fn run_orchestrator(
     cwd: Option<PathBuf>,
     max_failures: u32,
     notify: bool,
+    keep_worktrees: bool,
 ) -> workyard_core::Result<Value> {
     let db = store.path().to_path_buf();
     let mut log_dir = db.clone().into_os_string();
@@ -1164,6 +1177,7 @@ fn run_orchestrator(
             Permissions::Safe => "safe".into(),
         },
         supervisor,
+        keep_worktrees,
         ..Options::default()
     };
     eprintln!("Orchestrating {board}. Press Ctrl-C to stop; workers are paused and the lease released.");

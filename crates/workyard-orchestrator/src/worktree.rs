@@ -147,6 +147,40 @@ pub fn ensure_worktree_noting(main: &Path, card_key: &str) -> io::Result<(PathBu
     Ok((path, note))
 }
 
+/// Remove a finished card's worktree and delete its branch. Safe by construction: nothing is
+/// forced, so a dirty or locked worktree and a branch that is not merged into the main
+/// checkout's branch are left alone (`Ok(None)` when there is nothing to remove, `Err` with
+/// the reason when something was left behind). `Ok(Some(..))` says what was removed.
+pub fn remove_merged(main: &Path, card_key: &str) -> io::Result<Option<String>> {
+    let path = worktree_path(main, card_key);
+    let branch = branch_for(card_key);
+    let has_branch = git(main, &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")])?.0;
+    let has_worktree = path.join(".git").exists();
+    if !has_branch && !has_worktree {
+        return Ok(None);
+    }
+    // `branch -d` only checks against HEAD or the upstream, so check the target explicitly.
+    if has_branch && !git(main, &["merge-base", "--is-ancestor", &branch, "HEAD"])?.0 {
+        return Err(io::Error::other(format!("{branch} is not merged into the main checkout's branch")));
+    }
+    let mut removed = Vec::new();
+    if has_worktree {
+        let (ok, _, err) = git(main, &["worktree", "remove", &path.to_string_lossy()])?;
+        if !ok {
+            return Err(failed(&format!("left the worktree {}", path.display()), err));
+        }
+        removed.push(format!("worktree {}", path.display()));
+    }
+    if has_branch {
+        let (ok, _, err) = git(main, &["branch", "-d", &branch])?;
+        if !ok {
+            return Err(failed(&format!("left the branch {branch}"), err));
+        }
+        removed.push(format!("branch {branch}"));
+    }
+    Ok(Some(removed.join(" and ")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +286,52 @@ mod tests {
         std::fs::write(path.join(SETUP_SCRIPT), "sleep 30\n").unwrap();
         let err = run_setup(&main, &path, "C-9", Duration::from_millis(200)).unwrap_err();
         assert!(err.contains("timed out"), "{err}");
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    fn commit_in(path: &Path, file: &str) {
+        std::fs::write(path.join(file), file).unwrap();
+        assert!(git(path, &["add", "-A"]).unwrap().0);
+        assert!(git(path, &["commit", "-q", "-m", file]).unwrap().0);
+    }
+
+    #[test]
+    fn a_merged_cards_worktree_and_branch_are_removed() {
+        let main = repo();
+        let path = ensure_worktree(&main, "C-10").unwrap();
+        commit_in(&path, "a.txt");
+        assert!(git(&main, &["merge", "--ff-only", "workyard/c-10"]).unwrap().0);
+        let said = remove_merged(&main, "C-10").unwrap().unwrap();
+        assert!(said.contains("worktree") && said.contains("branch workyard/c-10"), "{said}");
+        assert!(!path.exists());
+        assert!(!git(&main, &["rev-parse", "--verify", "-q", "refs/heads/workyard/c-10"]).unwrap().0);
+        assert!(main.join("a.txt").exists());
+        // Nothing left: a second call is a no-op.
+        assert_eq!(remove_merged(&main, "C-10").unwrap(), None);
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn a_dirty_worktree_is_kept() {
+        let main = repo();
+        let path = ensure_worktree(&main, "C-11").unwrap();
+        commit_in(&path, "a.txt");
+        assert!(git(&main, &["merge", "--ff-only", "workyard/c-11"]).unwrap().0);
+        std::fs::write(path.join("scratch.txt"), "unsaved").unwrap();
+        assert!(remove_merged(&main, "C-11").is_err());
+        assert!(path.join("scratch.txt").exists());
+        assert!(git(&main, &["rev-parse", "--verify", "-q", "refs/heads/workyard/c-11"]).unwrap().0);
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn a_branch_that_is_not_on_main_is_kept() {
+        let main = repo();
+        let path = ensure_worktree(&main, "C-12").unwrap();
+        commit_in(&path, "a.txt");
+        let err = remove_merged(&main, "C-12").unwrap_err().to_string();
+        assert!(err.contains("not merged"), "{err}");
+        assert!(path.join("a.txt").exists());
         let _ = std::fs::remove_dir_all(&main);
     }
 

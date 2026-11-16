@@ -1,4 +1,3 @@
--- The binary that holds a board's lease: package version and schema version. A binary that
--- would migrate the database refuses while a live lease belongs to an older schema.
-ALTER TABLE orchestrator_sessions ADD COLUMN binary_version TEXT;
-ALTER TABLE orchestrator_sessions ADD COLUMN schema_version INTEGER;
+-- How many phases past the current one the dispatcher may offer work from. NULL is unlimited;
+-- 1 offers the next phase only once the current phase has no ready work.
+ALTER TABLE boards ADD COLUMN phase_window INTEGER CHECK (phase_window IS NULL OR phase_window >= 1);

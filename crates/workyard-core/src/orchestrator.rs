@@ -103,8 +103,8 @@ pub(crate) fn check_migration_allowed(db: &Connection, version: i64) -> Result<(
     if version < 11 {
         return Ok(());
     }
-    // The lease records its binary's schema from schema 17; an older lease row has none.
-    let versions = if version >= 17 { "schema_version,binary_version" } else { "NULL,NULL" };
+    // The lease records its binary's schema from schema 18; an older lease row has none.
+    let versions = if version >= 18 { "schema_version,binary_version" } else { "NULL,NULL" };
     let sql = format!(
         "SELECT b.key,s.holder,s.host,s.pid,s.lease_expires_at,{versions} FROM orchestrator_sessions s JOIN boards b ON b.id=s.board_id WHERE s.holder IS NOT NULL"
     );
@@ -207,7 +207,12 @@ impl Store {
     pub fn orchestrator_status(&self, board: &str) -> Result<Value> {
         let db = self.open()?;
         let board_id = resolve_board(&db, board)?;
-        session_row(&db, &board_id)
+        let mut row = session_row(&db, &board_id)?;
+        let held = crate::phases::held_back_by_phase(&db, &board_id)?;
+        row["phase_window"] = crate::phases::phase_window(&db, &board_id)?.into();
+        row["held_back_by_phase"] = json!(held.len());
+        row["held_back_cards"] = json!(held);
+        Ok(row)
     }
 
     /// Take the board's lease. Check and claim happen in one immediate transaction, so two

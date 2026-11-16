@@ -85,6 +85,53 @@ pub(crate) fn ensure_dependency_order(
     }
 }
 
+/// How many phases past the current one may be worked early; `None` is unlimited.
+pub(crate) fn phase_window(db: &Connection, board_id: &str) -> Result<Option<i64>> {
+    Ok(db.query_row("SELECT phase_window FROM boards WHERE id=?1", [board_id], |r| r.get(0))?)
+}
+
+/// Whether work `distance` phases past the current one may be dispatched. A window of 1 is
+/// the original rule: the next phase only once the current phase has no ready work.
+pub(crate) fn phase_offered(distance: i64, window: Option<i64>, current_has_work: bool) -> bool {
+    match window {
+        _ if distance <= 0 => true,
+        Some(1) => distance == 1 && !current_has_work,
+        Some(w) => distance <= w,
+        None => true,
+    }
+}
+
+/// `all` is unlimited; otherwise a phase count of at least 1.
+pub fn parse_phase_window(text: &str) -> Result<Option<i64>> {
+    if text == "all" {
+        return Ok(None);
+    }
+    text.parse::<i64>().ok().filter(|w| *w >= 1).map(Some).ok_or_else(|| {
+        Error::new("validation_error", "phase window must be a number of at least 1, or all")
+    })
+}
+
+/// Keys of ready Backlog cards the dispatcher is not offering because of the phase window.
+pub(crate) fn held_back_by_phase(db: &Connection, board_id: &str) -> Result<Vec<String>> {
+    let (_, current) = current_phase(db, board_id)?;
+    let window = phase_window(db, board_id)?;
+    let current_has_work = current_queue_has_work(db, board_id)?;
+    let mut stmt = db.prepare("SELECT c.id,p.position FROM cards c JOIN lanes l ON l.id=c.lane_id JOIN phases p ON p.id=c.phase_id WHERE c.board_id=?1 AND p.position>?2 AND p.closed_at IS NULL AND l.kind='backlog' AND l.archived=0 AND c.owner_actor IS NULL AND c.cancelled_at IS NULL ORDER BY p.position,c.position,c.key")?;
+    let rows = stmt.query_map(params![board_id, current], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let mut keys = Vec::new();
+    for row in rows {
+        let (id, position) = row?;
+        if phase_offered(position - current, window, current_has_work) {
+            continue;
+        }
+        let card = card_row(db, &id)?;
+        if card["ready"] == true {
+            keys.push(card["key"].as_str().unwrap_or_default().to_owned());
+        }
+    }
+    Ok(keys)
+}
+
 pub(crate) fn current_queue_has_work(db: &Connection, board_id: &str) -> Result<bool> {
     let (phase_id, _) = current_phase(db, board_id)?;
     let mut stmt=db.prepare("SELECT c.id FROM cards c JOIN lanes l ON l.id=c.lane_id WHERE c.phase_id=?1 AND l.kind='backlog' AND c.owner_actor IS NULL AND c.cancelled_at IS NULL ORDER BY c.position")?;
@@ -127,13 +174,14 @@ pub(crate) fn ensure_schedulable(db: &Connection, card: &Value) -> Result<()> {
             "card belongs to a completed phase",
         ));
     }
-    if phase.0 > current + 1 {
+    let window = phase_window(db, board_id)?;
+    if window.is_some_and(|w| phase.0 > current + w) {
         return Err(Error::new(
             "phase_planned",
-            "only the immediately next phase can start early",
+            "this phase is beyond the board's phase window",
         ));
     }
-    if phase.0 == current + 1 && current_queue_has_work(db, board_id)? {
+    if window == Some(1) && phase.0 == current + 1 && current_queue_has_work(db, board_id)? {
         return Err(Error::new(
             "current_phase_queue_not_empty",
             "ready work remains in the current phase",
@@ -143,6 +191,30 @@ pub(crate) fn ensure_schedulable(db: &Connection, card: &Value) -> Result<()> {
 }
 
 impl Store {
+    /// Set how many phases past the current one the dispatcher may offer work from
+    /// (`None` is unlimited; 1 is the original next-phase-only rule).
+    pub fn set_board_phase_window(&self, actor: &str, board: &str, window: Option<i64>) -> Result<Value> {
+        if window.is_some_and(|w| w < 1) {
+            return Err(Error::new("validation_error", "phase window must be at least 1, or all"));
+        }
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_board_active(&tx, &board_id)?;
+        let before = board_row(&tx, &board_id)?;
+        if before["phase_window"] == json!(window) {
+            return Ok(before);
+        }
+        tx.execute(
+            "UPDATE boards SET phase_window=?2,version=version+1 WHERE id=?1",
+            params![board_id, window],
+        )?;
+        let after = board_row(&tx, &board_id)?;
+        record(&tx, actor, "board_phase_window_changed", &board_id, "board", &board_id, Some(&before), Some(&after), &[], "")?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
     pub fn list_phases(&self, board: &str) -> Result<Value> {
         let db = self.open()?;
         let board_id = resolve_board(&db, board)?;
