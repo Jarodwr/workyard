@@ -33,3 +33,15 @@ test("raw html stays text", () => {
   const [p] = parseMarkdown("<script>alert(1)</script>");
   assert.equal(p.inline[0].kind, "text");
 });
+
+test("tryParseMarkdown returns blocks, and null instead of throwing", async () => {
+  const { tryParseMarkdown } = await import("../src/lib/markdown.ts");
+  assert.equal(tryParseMarkdown("# hi")[0].kind, "heading");
+  assert.equal(tryParseMarkdown(null), null);
+});
+
+test("raw html stays text", () => {
+  const [p] = parseMarkdown("<script>alert(1)</script>");
+  assert.equal(p.kind, "paragraph");
+  assert.equal(p.inline.every((n) => n.kind === "text"), true);
+});

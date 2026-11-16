@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { parseMarkdown, type Block, type Inline } from "@/lib/markdown";
+import { tryParseMarkdown, type Block, type Inline } from "@/lib/markdown";
 
 function renderInline(nodes: Inline[]): ReactNode[] {
   return nodes.map((node, index) => {
@@ -41,6 +41,8 @@ function renderBlock(block: Block, key: number): ReactNode {
 }
 
 /** Renders markdown as React elements; raw HTML in the source is shown as text, never injected. */
-export function Markdown({ source }: { source: string }) {
-  return <div className="space-y-3">{parseMarkdown(source).map(renderBlock)}</div>;
+export function Markdown({ source, className = "" }: { source: string; className?: string }) {
+  const blocks = tryParseMarkdown(source);
+  if (!blocks) return <p className={`whitespace-pre-wrap text-sm leading-relaxed ${className}`}>{source}</p>;
+  return <div className={`space-y-3 ${className}`}>{blocks.map(renderBlock)}</div>;
 }
