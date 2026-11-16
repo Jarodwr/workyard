@@ -315,7 +315,7 @@ impl Store {
         let before = if is_question {
             question_row(&tx, &id)?
         } else {
-            guard_card(&tx, &id, actor, expected)?
+            guard_card(&tx, &id, actor, Some(expected))?
         };
         if is_question {
             check_version(&before, expected)?;
@@ -424,7 +424,7 @@ impl Store {
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
-        let before = guard_card(&tx, &id, actor, expected)?;
+        let before = guard_card(&tx, &id, actor, Some(expected))?;
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
         ensure_phase_open(&tx, board_id, before["phase_id"].as_str().unwrap())?;

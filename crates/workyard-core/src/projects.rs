@@ -376,7 +376,7 @@ impl Store {
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let card_id = resolve_card(&tx, card)?;
-        let before = guard_card(&tx, &card_id, actor, expected)?;
+        let before = guard_card(&tx, &card_id, actor, Some(expected))?;
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
         crate::phases::ensure_phase_open(&tx, board_id, before["phase_id"].as_str().unwrap())?;
@@ -490,7 +490,7 @@ impl Store {
         let before = change_row(&tx, change)?;
         check_version(&before, expected_change)?;
         let card_id = before["card_id"].as_str().unwrap();
-        let card_before = guard_card(&tx, card_id, actor, expected_card)?;
+        let card_before = guard_card(&tx, card_id, actor, Some(expected_card))?;
         let board_id = card_before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
         if before["review_required"] == required {

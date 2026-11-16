@@ -96,24 +96,24 @@ enum TaskCommand {
     },
     Release {
         card: String,
-        #[arg(long)]
-        expected_version: i64,
+        #[arg(long, help = "Required unless you own the card")]
+        expected_version: Option<i64>,
     },
     Move {
         card: String,
         lane: String,
         #[arg(long)]
         position: Option<i64>,
-        #[arg(long)]
-        expected_version: i64,
+        #[arg(long, help = "Required unless you own the card")]
+        expected_version: Option<i64>,
     },
     Progress {
         card: String,
         progress: i64,
         #[arg(long)]
         note: Option<String>,
-        #[arg(long)]
-        expected_version: i64,
+        #[arg(long, help = "Required unless you own the card")]
+        expected_version: Option<i64>,
     },
     Note {
         card: String,
@@ -121,8 +121,8 @@ enum TaskCommand {
     },
     Update {
         card: String,
-        #[arg(long)]
-        expected_version: i64,
+        #[arg(long, help = "Required unless you own the card")]
+        expected_version: Option<i64>,
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]

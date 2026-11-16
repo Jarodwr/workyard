@@ -608,7 +608,7 @@ impl Store {
         &self,
         actor: &str,
         card: &str,
-        expected: i64,
+        expected: impl Into<Option<i64>>,
         title: Option<&str>,
         description: Option<&str>,
         priority: Option<&str>,
@@ -623,6 +623,7 @@ impl Store {
         if let Some(priority) = priority {
             validate_priority(priority)?;
         }
+        let expected: Option<i64> = expected.into();
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
@@ -705,14 +706,27 @@ impl Store {
         &self,
         actor: &str,
         card: &str,
-        expected: i64,
+        expected: impl Into<Option<i64>>,
         force_reason: Option<&str>,
     ) -> Result<Value> {
+        let expected: Option<i64> = expected.into();
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
         let before = card_row(&tx, &id)?;
-        check_version(&before, expected)?;
+        match expected {
+            Some(expected) => check_version(&before, expected)?,
+            None if force_reason.is_none() && before["owner_actor"].as_str() == Some(actor) => {}
+            None if force_reason.is_some() => {
+                return Err(Error::new(
+                    "version_required",
+                    "force release needs the card's expected version",
+                )
+                .hint("Pass --expected-version")
+                .details(json!({"current":before})));
+            }
+            None => return Err(version_required(&before, actor)),
+        }
         let owner = before["owner_actor"]
             .as_str()
             .ok_or_else(|| Error::new("validation_error", "card is not claimed"))?;
@@ -817,8 +831,9 @@ impl Store {
         card: &str,
         destination: &str,
         position: Option<i64>,
-        expected: i64,
+        expected: impl Into<Option<i64>>,
     ) -> Result<Value> {
+        let expected: Option<i64> = expected.into();
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
@@ -920,9 +935,10 @@ impl Store {
         card: &str,
         progress: i64,
         note: Option<&str>,
-        expected: i64,
+        expected: impl Into<Option<i64>>,
     ) -> Result<Value> {
         let progress = i64::from(Progress::try_from(progress)?);
+        let expected: Option<i64> = expected.into();
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
@@ -974,7 +990,7 @@ impl Store {
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
-        let before = guard_card(&tx, &id, actor, expected)?;
+        let before = guard_card(&tx, &id, actor, Some(expected))?;
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
         let resolved_target = resolve_dependency_target(&tx, target)?;
@@ -1074,7 +1090,7 @@ impl Store {
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = resolve_card(&tx, card)?;
-        let before = guard_card(&tx, &id, actor, expected)?;
+        let before = guard_card(&tx, &id, actor, Some(expected))?;
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
         let target_id = match resolve_dependency_target(&tx, target)? {
@@ -1133,7 +1149,7 @@ impl Store {
             )
             .optional()?
             .ok_or_else(|| Error::new("not_found", "dependency not found"))?;
-        let before = guard_card(&tx, &card_id, actor, expected)?;
+        let before = guard_card(&tx, &card_id, actor, Some(expected))?;
         let board_id = before["board_id"].as_str().unwrap();
         check_board_active(&tx, board_id)?;
         if old_scope == scope {
@@ -2007,9 +2023,25 @@ fn owner_error(owner: &str) -> Error {
     Error::new("ownership_conflict", format!("card is owned by {owner}"))
         .hint("Ask the owner to edit or transfer the card, or use force-release for recovery")
 }
-fn guard_card(db: &Connection, id: &str, actor: &str, expected: i64) -> Result<Value> {
+/// An owner may omit the version: the claim already serializes their writes.
+fn version_required(row: &Value, actor: &str) -> Error {
+    match row["owner_actor"].as_str() {
+        Some(owner) if owner != actor => owner_error(owner),
+        _ => Error::new(
+            "version_required",
+            "expected version may be omitted only by the card's owner",
+        )
+        .hint("Pass --expected-version, or claim the card first")
+        .details(json!({"current":row})),
+    }
+}
+fn guard_card(db: &Connection, id: &str, actor: &str, expected: Option<i64>) -> Result<Value> {
     let row = card_row(db, id)?;
-    check_version(&row, expected)?;
+    match expected {
+        Some(expected) => check_version(&row, expected)?,
+        None if row["owner_actor"].as_str() == Some(actor) => {}
+        None => return Err(version_required(&row, actor)),
+    }
     phases::ensure_phase_open(
         db,
         row["board_id"].as_str().unwrap(),

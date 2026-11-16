@@ -1574,3 +1574,31 @@ fn concurrent_session_resumes_have_one_winner() {
     let events = store.poll_events(0, 100).unwrap();
     assert_eq!(events["events"].as_array().unwrap().iter().filter(|event| event["type"] == "task_session_resumed").count(), 1);
 }
+
+#[test]
+fn owner_may_omit_version_but_others_may_not() {
+    let (_dir, store, board) = setup();
+    let card = store
+        .create_card("cli", &board, "Task", "", "P2", None)
+        .unwrap();
+    let key = card["key"].as_str().unwrap();
+    // Unclaimed cards still require a version.
+    let err = store.update_progress("agent:a", key, 10, None, None::<i64>).unwrap_err();
+    assert_eq!(err.code, "version_required");
+    let claimed = store.claim_card("agent:a", key, 1).unwrap();
+    // The owner can write without a version, and the result carries the new one.
+    let moved = store.move_card("agent:a", key, "In Progress", None, None::<i64>).unwrap();
+    assert_eq!(moved["version"].as_i64().unwrap(), claimed["version"].as_i64().unwrap() + 1);
+    let progressed = store.update_progress("agent:a", key, 40, Some("half"), None::<i64>).unwrap();
+    assert_eq!(progressed["progress"], 40);
+    // Another actor is told who owns it, not just that a version is missing.
+    let err = store.update_progress("agent:b", key, 50, None, None::<i64>).unwrap_err();
+    assert_eq!(err.code, "ownership_conflict");
+    // An explicit stale version still conflicts for the owner.
+    let err = store.update_progress("agent:a", key, 50, None, 1).unwrap_err();
+    assert_eq!(err.code, "version_conflict");
+    // Force release always needs the version.
+    let err = store.release_card("cli", key, None::<i64>, Some("agent died")).unwrap_err();
+    assert_eq!(err.code, "version_required");
+    store.release_card("agent:a", key, None::<i64>, None).unwrap();
+}
