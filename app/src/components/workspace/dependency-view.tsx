@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card as UiCard } from "@/components/ui/card";
 import { StakeholderPicker } from "@/components/workspace/question-card";
 import {
-  buildPhaseDependencyLayout, GRAPH_NODE_HEIGHT, GRAPH_NODE_WIDTH, questionOnlyBlockerCounts, routeDependencyEdges,
+  buildPhaseDependencyLayout, graphFrame, GRAPH_NODE_HEIGHT, GRAPH_ZOOM_LEVELS, GRAPH_NODE_WIDTH, questionOnlyBlockerCounts, routeDependencyEdges,
   traceDependencies, type GraphEdgeInput, type GraphNodeInput,
 } from "@/lib/dependency-layout";
 import { cn } from "@/lib/utils";
@@ -39,7 +39,7 @@ export function DependencyView({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState<number>(1);
   const [answeringId, setAnsweringId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [answerNote, setAnswerNote] = useState("");
@@ -132,6 +132,7 @@ export function DependencyView({
   const selected = selectedId ? layout.nodes.find((node) => node.id === selectedId) : null;
   const trace = selected ? traceDependencies(layout, selected.id) : null;
   const nodeById = new Map(layout.nodes.map((node) => [node.id, node]));
+  const frame = graphFrame(layout, zoom);
   const routes = useMemo(() => routeDependencyEdges(layout.nodes, layout.edges), [layout]);
   const cardById = new Map(cards.map((card) => [card.id, card]));
   const questionById = new Map(questions.map((question) => [question.id, question]));
@@ -151,8 +152,8 @@ export function DependencyView({
             <p className="text-xs text-muted-foreground">{board.phases.some((phase)=>phase.status==="closed") && !showCompleted ? "Completed phases are hidden. Use Show completed to view them." : "Card and question dependencies will form a graph here."}</p>
           </UiCard>
         ) : (
-          <div style={{ width: layout.width * zoom, height: layout.height * zoom }}>
-            <div className="sticky top-0 z-20 -mb-14 flex h-14 border-b bg-background/95 backdrop-blur-sm" style={{ width: layout.width * zoom }}>
+          <div style={{ width: frame.width, height: frame.height }}>
+            <div className="sticky top-0 z-20 flex h-14 border-b bg-background/95 backdrop-blur-sm" style={{ width: layout.width * zoom }}>
               {layout.phaseBands?.map((phase) => <div key={phase.id} className={cn("flex min-w-0 shrink-0 flex-col justify-center border-r border-border/70 px-4", phase.status === "current" ? "bg-primary/10" : "bg-background/95")} style={{ width: phase.width * zoom }}><button className="w-fit max-w-full truncate text-left text-xs font-semibold hover:text-primary hover:underline" onClick={()=>onOpenPhase(phase.id)} title={`Open ${phase.name} Kanban`}>{phase.name}</button><span className="line-clamp-2 text-[10px] leading-3 text-muted-foreground" title={phase.description}>{phase.description || `${phase.status} phase`}</span></div>)}
             </div>
             <div className="relative" style={{ width: layout.width, height: layout.height, transform: `scale(${zoom})`, transformOrigin: "top left" }}>
@@ -181,7 +182,7 @@ export function DependencyView({
                       stroke={edge.scope === "finish" && !edge.resolved ? "#6366f1" : edge.longestChain ? "var(--primary)" : edge.resolved ? "var(--muted-foreground)" : "#d89539"}
                       strokeWidth={edge.longestChain || (focused && trace) ? 2.5 : 1.5}
                       strokeDasharray={edge.scope === "finish" && !edge.resolved ? "2 4" : !edge.resolved ? "5 4" : undefined}
-                      markerEnd={`url(#arrow-${arrow})`}
+                      markerEnd={routes.get(edge.id)?.arrowhead === false ? undefined : `url(#arrow-${arrow})`}
                       opacity={trace ? focused ? 0.9 : 0.08 : edge.longestChain ? 0.95 : edge.resolved ? 0.3 : 0.48}
                     />
                   );
@@ -250,9 +251,9 @@ export function DependencyView({
           </button>
         ) : <span />}
         <div className="pointer-events-auto flex items-center gap-0.5 rounded-md border bg-card/95 p-0.5 shadow-sm">
-          <Button variant="ghost" size="icon" className="size-6" aria-label="Zoom out" disabled={zoom <= 0.7} onClick={() => setZoom((value) => Math.max(0.7, +(value - 0.15).toFixed(2)))}><Minus className="size-3" /></Button>
+          <Button variant="ghost" size="icon" className="size-6" aria-label="Zoom out" disabled={zoom <= GRAPH_ZOOM_LEVELS[0]} onClick={() => setZoom((value) => GRAPH_ZOOM_LEVELS[Math.max(0, GRAPH_ZOOM_LEVELS.indexOf(value as never) - 1)])}><Minus className="size-3" /></Button>
           <span className="w-9 text-center font-mono text-[10px]">{Math.round(zoom * 100)}%</span>
-          <Button variant="ghost" size="icon" className="size-6" aria-label="Zoom in" disabled={zoom >= 1.3} onClick={() => setZoom((value) => Math.min(1.3, +(value + 0.15).toFixed(2)))}><Plus className="size-3" /></Button>
+          <Button variant="ghost" size="icon" className="size-6" aria-label="Zoom in" disabled={zoom >= GRAPH_ZOOM_LEVELS[GRAPH_ZOOM_LEVELS.length - 1]} onClick={() => setZoom((value) => GRAPH_ZOOM_LEVELS[Math.min(GRAPH_ZOOM_LEVELS.length - 1, GRAPH_ZOOM_LEVELS.indexOf(value as never) + 1)])}><Plus className="size-3" /></Button>
         </div>
       </div>
       {answering && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={(event)=>{if(event.target===event.currentTarget)setAnsweringId(null);}}>

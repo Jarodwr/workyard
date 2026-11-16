@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Bot, ClipboardList, Hourglass, Info, Pause, Play, Settings2, ShieldAlert, ShieldCheck, Square, Waves } from "lucide-react";
-import type { Orchestrator } from "@/api";
+import { getSupervisorPreference, setSupervisorPreference, type Orchestrator } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Popover } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
@@ -33,7 +33,7 @@ export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState
         <Bot className="size-3.5" /> Agents
         {runningAgents > 0 && <span className="rounded-full bg-primary px-1.5 text-[10px] font-semibold tabular-nums leading-4 text-primary-foreground" aria-label={`${runningAgents} running`}>{runningAgents}</span>}
       </Button>
-      <SettingsButton orchestrator={orchestrator} reviewRequired={reviewRequired} onReviewRequired={onReviewRequired} />
+      <SettingsButton boardKey={boardKey} orchestrator={orchestrator} reviewRequired={reviewRequired} onReviewRequired={onReviewRequired} />
       <OrchestratorControls boardKey={boardKey} orchestrator={orchestrator} onState={onOrchestratorState} onStart={onStartOrchestrator} onStop={onStopOrchestrator} />
       <Button size="sm" variant="outline" className="h-7 gap-1.5 px-2.5 text-xs" onClick={onPlan} title="Open a planner agent in your terminal, pointed at this board">
         <ClipboardList className="size-3.5" /> Plan
@@ -42,8 +42,9 @@ export function BoardToolbar({ boardKey, left, orchestrator, onOrchestratorState
   );
 }
 
-function SettingsButton({ orchestrator, reviewRequired, onReviewRequired }: { orchestrator: Orchestrator | null; reviewRequired: boolean; onReviewRequired: (required: boolean) => void }) {
+function SettingsButton({ boardKey, orchestrator, reviewRequired, onReviewRequired }: { boardKey: string; orchestrator: Orchestrator | null; reviewRequired: boolean; onReviewRequired: (required: boolean) => void }) {
   const full = orchestrator?.permissions !== "safe";
+  const [supervisor, setSupervisor] = useState(() => getSupervisorPreference(boardKey));
   return (
     <Popover
       trigger={({ open, toggle }) => (
@@ -64,6 +65,10 @@ function SettingsButton({ orchestrator, reviewRequired, onReviewRequired }: { or
           {!orchestrator?.connected && " Set when the orchestrator starts."}
         </span>
       </p>
+      <label className="mt-3 flex cursor-pointer items-start gap-2 text-muted-foreground">
+        <input type="checkbox" className="mt-0.5" checked={supervisor} onChange={(event) => { setSupervisor(event.target.checked); setSupervisorPreference(boardKey, event.target.checked); }} />
+        <span><strong className="text-foreground">Supervisor agent</strong>: also run an agent that handles what needs judgement. Applies the next time you start the orchestrator.</span>
+      </label>
       <p className="mb-2 mt-3 border-t pt-3 font-medium text-foreground">Review</p>
       <label className="flex cursor-pointer items-start gap-2 text-muted-foreground">
         <input type="checkbox" className="mt-0.5" checked={reviewRequired} onChange={(event) => onReviewRequired(event.target.checked)} />

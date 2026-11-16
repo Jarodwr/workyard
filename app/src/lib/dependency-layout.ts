@@ -265,7 +265,22 @@ export function traceDependencies(layout: DependencyLayout, selectedId: string) 
 // share a trunk, so they read as a branch or a merge rather than as overlapping lines.
 
 export type Point = [number, number];
-export type RoutedEdge = { d: string; points: Point[] };
+/** `arrowhead` is false for wires that merge into another wire's arrival: they end at the trunk. */
+export type RoutedEdge = { d: string; points: Point[]; arrowhead: boolean };
+
+/** Zoom steps offered by the graph view. */
+export const GRAPH_ZOOM_LEVELS = [0.5, 0.75, 1, 1.5] as const;
+/** Height in screen pixels of the sticky phase header; the scaled graph sits below it. */
+export const GRAPH_HEADER_HEIGHT = 56;
+
+/** Screen-space frame of the graph at a zoom: the header takes its own rows, the graph scales below. */
+export function graphFrame(layout: Pick<DependencyLayout, "width" | "height">, zoom: number) {
+  return {
+    width: layout.width * zoom,
+    contentTop: GRAPH_HEADER_HEIGHT,
+    height: GRAPH_HEADER_HEIGHT + layout.height * zoom,
+  };
+}
 
 const CLEARANCE = 6; // space kept between a wire and a card
 const TRACK = 5; // distance between parallel wires
@@ -273,6 +288,8 @@ const GUTTER_INSET = 14; // first track's distance from a card's side
 const ARRIVAL_RUN = 34; // straight run into a card, long enough for the arrowhead to sit on it
 const ARROW_GAP = 3; // the arrow tip's distance from the card's edge
 const ARROW_HALF = 5; // half the arrowhead's length: a wire ends at the middle of its arrowhead
+const MAX_ROW_GAP_TRACKS = 3; // tracks that fit between two rows without touching a card
+const MAX_OPEN_TRACKS = 12; // tracks in a corridor with nothing beside it
 const TOP_BAND_PENALTY = 60; // corridors above the first row sit under the sticky phase header
 
 /** Does a horizontal run at `y` between `xa` and `xb` touch a card other than `skip`? */
@@ -336,6 +353,7 @@ export function routeDependencyEdges(nodes: LayoutNode[], edges: GraphEdgeInput[
     corridor: number | null; // y of the corridor run, or null for a direct run
   };
   const routes: Route[] = [];
+  const occupancy = new Map<number, { start: number; end: number }[]>();
   for (const edge of [...edges].sort((a, b) => a.id.localeCompare(b.id))) {
     const from = byId.get(edge.source);
     const to = byId.get(edge.target);
@@ -348,13 +366,20 @@ export function routeDependencyEdges(nodes: LayoutNode[], edges: GraphEdgeInput[
     const directClear = !runHitsCard(nodes, x1, x2 - ARRIVAL_RUN, y1, from.id);
     let corridor: number | null = null;
     if (!directClear) {
+      // Cheapest clear corridor that still has a free track: the gap between rows only fits a few.
+      const interval = { start: x1, end: x2 };
       let best = Infinity;
       for (const y of corridorYs) {
         if (runHitsCard(nodes, x1 + GUTTER_INSET, x2 - ARRIVAL_RUN, y, "")) continue;
         const cost = Math.abs(y - y1) + Math.abs(y - y2) + (y < minTop - 8 ? TOP_BAND_PENALTY : 0);
-        if (cost < best) { best = cost; corridor = y; }
+        if (cost >= best) continue;
+        const crowd = [...(occupancy.get(y) ?? []), interval];
+        const tracks = Math.max(...colourIntervals(crowd).values()) + 1;
+        if (tracks > (y < minTop - 8 ? MAX_OPEN_TRACKS : MAX_ROW_GAP_TRACKS)) continue;
+        best = cost; corridor = y;
       }
       corridor ??= Math.max(64, minTop - 24); // nothing clear: take the top band regardless
+      occupancy.set(corridor, [...(occupancy.get(corridor) ?? []), interval]);
     }
     routes.push({ edge, from, to, x1, y1, x2, y2, corridor });
   }
@@ -425,11 +450,23 @@ export function routeDependencyEdges(nodes: LayoutNode[], edges: GraphEdgeInput[
   }
 
   const result = new Map<string, RoutedEdge>();
+  const arrivalX = (route: Route) => {
+    const key = keys.get(route)!.in;
+    return route.x2 - ARRIVAL_RUN - (key ? trackOf.get(key)! * TRACK : 0);
+  };
+  // Every wire into a card overlaps on its last run, so only one of them draws the arrowhead:
+  // the one reaching furthest left (ties by id). The others end where they join that run.
+  const arrowOwner = new Map<string, Route>();
+  for (const route of routes) {
+    const best = arrowOwner.get(route.to.id);
+    if (!best || arrivalX(route) < arrivalX(best)) arrowOwner.set(route.to.id, route);
+  }
   for (const route of routes) {
     const used = keys.get(route)!;
     const yc = corridorY.get(route) ?? route.y1;
-    const xIn = route.x2 - ARRIVAL_RUN - (used.in ? trackOf.get(used.in)! * TRACK : 0);
-    const end: Point = [route.x2 - ARROW_GAP - ARROW_HALF, route.y2];
+    const xIn = arrivalX(route);
+    const arrowhead = arrowOwner.get(route.to.id) === route;
+    const end: Point = arrowhead ? [route.x2 - ARROW_GAP - ARROW_HALF, route.y2] : [xIn, route.y2];
     let points: Point[];
     if (route.corridor === null) {
       points = [[route.x1, route.y1], [xIn, route.y1], [xIn, route.y2], end];
@@ -437,7 +474,7 @@ export function routeDependencyEdges(nodes: LayoutNode[], edges: GraphEdgeInput[
       const xOut = route.x1 + GUTTER_INSET + (used.out ? trackOf.get(used.out)! * TRACK : 0);
       points = [[route.x1, route.y1], [xOut, route.y1], [xOut, yc], [xIn, yc], [xIn, route.y2], end];
     }
-    result.set(route.edge.id, { d: roundedPath(points), points });
+    result.set(route.edge.id, { d: roundedPath(points), points, arrowhead });
   }
   return result;
 }
