@@ -39,6 +39,18 @@ pub struct ClaudeRunner {
     pub cwd: Option<PathBuf>,
     /// Each worker's output is appended to `<log_dir>/<card>-<session>.log`.
     pub log_dir: PathBuf,
+    /// Directory holding a stable copy of `workyard`, put first on each worker's PATH. Without
+    /// it, workers use the directory of the running executable, which a rebuild can replace.
+    pub bin_dir: Option<PathBuf>,
+}
+
+/// The PATH a worker gets: `dir` first, then whatever PATH the orchestrator has.
+fn worker_path(dir: PathBuf, existing: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
+    let mut paths = vec![dir];
+    if let Some(existing) = existing {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(paths).ok()
 }
 
 /// Does this stream-json line say the run hit a usage limit?
@@ -312,15 +324,13 @@ impl Runner for ClaudeRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log.try_clone()?);
-        // The worker must find the same `workyard` binary the orchestrator is running from.
-        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
-            let mut paths = vec![dir];
-            if let Some(existing) = std::env::var_os("PATH") {
-                paths.extend(std::env::split_paths(&existing));
-            }
-            if let Ok(joined) = std::env::join_paths(paths) {
-                command.env("PATH", joined);
-            }
+        // The worker must find a `workyard` that a rebuild of the orchestrator cannot replace.
+        let dir = self
+            .bin_dir
+            .clone()
+            .or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)));
+        if let Some(joined) = dir.and_then(|dir| worker_path(dir, std::env::var_os("PATH"))) {
+            command.env("PATH", joined);
         }
         match (launch.workspace, &self.cwd) {
             // The worker's own checkout; the main one stays free for it to merge into.
@@ -386,6 +396,14 @@ impl Runner for ClaudeRunner {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn worker_path_starts_with_the_stable_copy() {
+        let path = worker_path(PathBuf::from("/stable/bin"), Some("/usr/bin:/bin".into())).unwrap();
+        let parts: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(parts[0], PathBuf::from("/stable/bin"));
+        assert_eq!(parts[1..], [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
+    }
 
     #[test]
     fn healthy_events_are_not_limits() {
