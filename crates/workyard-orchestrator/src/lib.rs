@@ -7,4 +7,4 @@ pub mod worktree;
 pub use claude::ClaudeRunner;
 pub use engine::{Options, Orchestrator, hostname};
 pub use notify::{MacNotifier, Notifier, Silent};
-pub use runner::{LimitHit, Launch, Runner, Worker, WorkerState, Workspace};
+pub use runner::{LimitHit, Launch, PermissionAnswer, PermissionAsk, Runner, Worker, WorkerState, Workspace};

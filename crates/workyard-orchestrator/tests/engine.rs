@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use workyard_core::Store;
-use workyard_orchestrator::{LimitHit, Launch, Notifier, Options, Orchestrator, Runner, Worker, WorkerState, hostname};
+use workyard_orchestrator::{LimitHit, Launch, Notifier, Options, Orchestrator, PermissionAnswer, PermissionAsk, Runner, Worker, WorkerState, hostname};
 
 struct TempDir(PathBuf);
 impl Drop for TempDir {
@@ -29,6 +29,9 @@ struct FakeRunner {
     /// What every worker reports as its activity, and the denials it hands over (once).
     activity: Arc<Mutex<Option<String>>>,
     denials: Arc<Mutex<Vec<String>>>,
+    /// Tools workers wait on a human for (handed over once), and the answers they were given.
+    asks: Arc<Mutex<Vec<PermissionAsk>>>,
+    answers: Arc<Mutex<Vec<(String, PermissionAnswer)>>>,
     checkout: Option<PathBuf>,
     /// Everything `send` delivered to any worker, and how many workers were stopped.
     messages: Arc<Mutex<Vec<String>>>,
@@ -39,6 +42,8 @@ struct FakeWorker {
     crashes: Arc<AtomicBool>,
     activity: Arc<Mutex<Option<String>>>,
     denials: Arc<Mutex<Vec<String>>>,
+    asks: Arc<Mutex<Vec<PermissionAsk>>>,
+    answers: Arc<Mutex<Vec<(String, PermissionAnswer)>>>,
     limit: Arc<Mutex<Option<LimitHit>>>,
     messages: Arc<Mutex<Vec<String>>>,
     stops: Arc<AtomicUsize>,
@@ -63,6 +68,13 @@ impl Worker for FakeWorker {
     }
     fn take_denials(&mut self) -> Vec<String> {
         std::mem::take(&mut *self.denials.lock().unwrap())
+    }
+    fn take_permission_asks(&mut self) -> Vec<PermissionAsk> {
+        std::mem::take(&mut *self.asks.lock().unwrap())
+    }
+    fn answer_permission(&mut self, request_id: &str, answer: &PermissionAnswer) -> std::io::Result<()> {
+        self.answers.lock().unwrap().push((request_id.to_owned(), answer.clone()));
+        Ok(())
     }
     fn stop(&mut self) {
         self.stops.fetch_add(1, Ordering::SeqCst);
@@ -97,6 +109,7 @@ impl Runner for FakeRunner {
             prompt: launch.prompt.clone(),
             resume: launch.resume,
             workspace: launch.workspace,
+            allow_rules: launch.allow_rules.clone(),
         };
         std::thread::spawn(move || {
             behavior(&launch, &store);
@@ -108,6 +121,8 @@ impl Runner for FakeRunner {
             crashes: Arc::clone(&self.crashes),
             activity: Arc::clone(&self.activity),
             denials: Arc::clone(&self.denials),
+            asks: Arc::clone(&self.asks),
+            answers: Arc::clone(&self.answers),
             limit: Arc::clone(&self.limit_next),
             messages: Arc::clone(&self.messages),
             stops: Arc::clone(&self.stops),
@@ -128,6 +143,8 @@ struct Harness {
     crashes: Arc<AtomicBool>,
     activity: Arc<Mutex<Option<String>>>,
     denials: Arc<Mutex<Vec<String>>>,
+    asks: Arc<Mutex<Vec<PermissionAsk>>>,
+    answers: Arc<Mutex<Vec<(String, PermissionAnswer)>>>,
     checkout: Mutex<Option<PathBuf>>,
     messages: Arc<Mutex<Vec<String>>>,
     stops: Arc<AtomicUsize>,
@@ -164,6 +181,8 @@ impl Harness {
             crashes: Arc::new(AtomicBool::new(false)),
             activity: Arc::new(Mutex::new(None)),
             denials: Arc::new(Mutex::new(Vec::new())),
+            asks: Arc::new(Mutex::new(Vec::new())),
+            answers: Arc::new(Mutex::new(Vec::new())),
             checkout: Mutex::new(None),
             messages: Arc::new(Mutex::new(Vec::new())),
             stops: Arc::new(AtomicUsize::new(0)),
@@ -212,6 +231,8 @@ impl Harness {
             crashes: Arc::clone(&self.crashes),
             activity: Arc::clone(&self.activity),
             denials: Arc::clone(&self.denials),
+            asks: Arc::clone(&self.asks),
+            answers: Arc::clone(&self.answers),
             checkout: self.checkout.lock().unwrap().clone(),
             messages: Arc::clone(&self.messages),
             stops: Arc::clone(&self.stops),
@@ -756,6 +777,65 @@ fn activity_is_published_on_the_card_and_a_refused_tool_notifies_once() {
     // Once the worker is gone its activity is cleared.
     let board = h.store.view_board(&h.board).unwrap().to_string();
     assert!(!board.contains("Edit app.mjs"), "{board}");
+}
+
+#[test]
+fn a_refused_tool_waits_for_a_human_and_the_worker_is_answered_without_a_restart() {
+    let h = Harness::new();
+    let key = h.card("Needs npm");
+    *h.asks.lock().unwrap() = vec![PermissionAsk {
+        request_id: "req-1".into(),
+        tool_use_id: "toolu_1".into(),
+        tool_name: "Bash".into(),
+        input: serde_json::json!({"command": "make test"}),
+        description: "Run the tests".into(),
+    }];
+    let (store, board) = (h.store.clone(), h.board.clone());
+    let handle = h.start_with(
+        Options { holder: "test".into(), pool: Some(1), idle_wait: Duration::from_millis(40), permissions: "safe".into(), ..Options::default() },
+        move |launch, worker_store| {
+            // The worker stays blocked until the human has decided, then finishes.
+            wait_until("a decision", || !store.permission_requests(&board, Some("allowed_run")).unwrap().as_array().unwrap().is_empty());
+            finish_card(launch, worker_store);
+        },
+    );
+    h.wait("the request is recorded", |s| !s.permission_requests(&h.board, Some("pending")).unwrap().as_array().unwrap().is_empty());
+    assert!(
+        h.notices.lock().unwrap().iter().any(|(t, b)| t.contains("approval") && b.contains(&key) && b.contains("Run the tests")),
+        "a human is told"
+    );
+    let request = h.store.permission_requests(&h.board, Some("pending")).unwrap()[0].clone();
+    h.store.permission_decide("human:me", request["id"].as_str().unwrap(), "allow_run", None, "").unwrap();
+    h.wait("done", |s| h.done_count(s) == 1);
+    h.finish(handle);
+    assert_eq!(
+        *h.answers.lock().unwrap(),
+        vec![("req-1".to_owned(), PermissionAnswer::Allow { rule: Some("Bash(make *)".into()) })]
+    );
+    assert_eq!(h.launches.lock().unwrap().len(), 1, "no restart");
+    // A respawned worker is given the rule again.
+    assert_eq!(h.store.permission_run_rules(&key).unwrap(), vec!["Bash(make *)"]);
+}
+
+#[test]
+fn requests_nobody_can_answer_any_more_expire_and_denials_reach_the_worker() {
+    let h = Harness::new();
+    h.card("Quits");
+    *h.asks.lock().unwrap() = vec![PermissionAsk {
+        request_id: "req-9".into(),
+        tool_use_id: String::new(),
+        tool_name: "Write".into(),
+        input: serde_json::json!({}),
+        description: "Write a file".into(),
+    }];
+    // The worker gives up and exits while its request is still open.
+    let handle = h.start_with(
+        Options { holder: "test".into(), pool: Some(1), max_failures: 1, idle_wait: Duration::from_millis(40), permissions: "safe".into(), ..Options::default() },
+        |_, _| std::thread::sleep(Duration::from_millis(400)),
+    );
+    h.wait("expired", |s| !s.permission_requests(&h.board, Some("expired")).unwrap().as_array().unwrap().is_empty());
+    h.finish(handle);
+    assert!(h.store.permission_requests(&h.board, Some("pending")).unwrap().as_array().unwrap().is_empty());
 }
 
 #[test]

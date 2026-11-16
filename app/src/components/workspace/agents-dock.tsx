@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, CircleHelp, Clock3, Square, Terminal, Unlock, X } from "lucide-react";
-import type { Board, Card, Question } from "@/api";
+import { useCallback, useEffect, useState } from "react";
+import { ChevronDown, ChevronRight, CircleHelp, Clock3, ShieldQuestion, Square, Terminal, Unlock, X } from "lucide-react";
+import { client, type Board, type Card, type PermissionDecision, type PermissionRequest, type Question } from "@/api";
 import { AgentLog } from "@/components/workspace/agent-log";
 import { Button } from "@/components/ui/button";
-import { agentState, boardAgents, elapsed, pendingQuestions, progressDisplay, type AgentStateKind } from "@/lib/agents";
+import { agentState, boardAgents, elapsed, pendingQuestions, permissionsFor, progressDisplay, runRuleFor, type AgentStateKind } from "@/lib/agents";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +33,15 @@ export function AgentsDock({ board, questions, onClose, onOpenCard, onAnswer, on
   const agents = boardAgents(board);
   const [now, setNow] = useState(() => Date.now());
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [requests, setRequests] = useState<PermissionRequest[]>([]);
+  const loadRequests = useCallback(() => {
+    client.pendingPermissions(board.key).then((next) => setRequests((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next))).catch(() => {});
+  }, [board.key]);
+  useEffect(() => {
+    loadRequests();
+    const timer = window.setInterval(loadRequests, 2000);
+    return () => window.clearInterval(timer);
+  }, [loadRequests]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 15_000);
     return () => window.clearInterval(timer);
@@ -53,6 +62,8 @@ export function AgentsDock({ board, questions, onClose, onOpenCard, onAnswer, on
             card={card}
             now={now}
             questions={pendingQuestions(card, questions)}
+            permissions={permissionsFor(card, requests)}
+            onDecided={loadRequests}
             open={expanded === card.id}
             onToggle={() => setExpanded(expanded === card.id ? null : card.id)}
             onOpenCard={onOpenCard}
@@ -68,10 +79,12 @@ export function AgentsDock({ board, questions, onClose, onOpenCard, onAnswer, on
   );
 }
 
-function AgentRow({ card, now, questions, open, onToggle, onOpenCard, onAnswer, onAddNote, onOpenInTerminal, onReleaseHold, onHold }: {
+function AgentRow({ card, now, questions, permissions, onDecided, open, onToggle, onOpenCard, onAnswer, onAddNote, onOpenInTerminal, onReleaseHold, onHold }: {
   card: Card;
   now: number;
   questions: Question[];
+  permissions: PermissionRequest[];
+  onDecided: () => void;
   open: boolean;
   onToggle: () => void;
   onOpenCard: (id: string) => void;
@@ -113,6 +126,9 @@ function AgentRow({ card, now, questions, open, onToggle, onOpenCard, onAnswer, 
           {session.activity && state.kind === "running" && <span className="mt-1 block truncate text-[10.5px] text-muted-foreground" title={session.activity}>{session.activity}</span>}
         </span>
       </button>
+      {permissions.map((request) => (
+        <InlinePermission key={request.id} request={request} onDecided={onDecided} />
+      ))}
       {questions.map((question) => (
         <InlineQuestion key={question.id} question={question} onAnswer={onAnswer} onOpenCard={() => onOpenCard(card.id)} />
       ))}
@@ -135,6 +151,37 @@ function AgentRow({ card, now, questions, open, onToggle, onOpenCard, onAnswer, 
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** A tool the worker is blocked on: one click lets it carry on, without a restart. */
+function InlinePermission({ request, onDecided }: { request: PermissionRequest; onDecided: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const decide = async (decision: PermissionDecision) => {
+    setBusy(true);
+    setError("");
+    try {
+      await client.decidePermission(request.id, decision);
+      onDecided();
+    } catch (failure) {
+      setError(String(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const command = typeof request.input?.command === "string" ? request.input.command : "";
+  return (
+    <div className="mx-2 mb-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2" role="group" aria-label={`${request.card_key} is waiting for approval`}>
+      <p className="flex items-start gap-1.5 text-[11px] font-medium"><ShieldQuestion className="mt-0.5 size-3 shrink-0 text-amber-700 dark:text-amber-300" /><span>Wants to use <span className="font-mono">{request.tool_name}</span>{request.description && <>: {request.description}</>}</span></p>
+      {command && <pre className="mt-1 max-h-16 overflow-auto whitespace-pre-wrap break-all rounded bg-muted px-1.5 py-1 font-mono text-[10px]">{command}</pre>}
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+        <Button size="sm" className="h-6 px-2 text-[11px]" disabled={busy} onClick={() => void decide("allow_once")}>Allow once</Button>
+        <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" disabled={busy} title={`Also allows ${runRuleFor(request)} until this run ends`} onClick={() => void decide("allow_run")}>Allow for this run</Button>
+        <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" disabled={busy} onClick={() => void decide("deny")}>Deny</Button>
+      </div>
+      {error && <p className="mt-1 text-[10.5px] text-destructive" role="alert">{error}</p>}
     </div>
   );
 }

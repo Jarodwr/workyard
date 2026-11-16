@@ -29,6 +29,30 @@ pub struct Launch {
     /// Continue an existing runtime session instead of starting a new one.
     pub resume: bool,
     pub workspace: Workspace,
+    /// Tool rules a human already granted "for this run" on this card (`Bash(touch *)`). The
+    /// runtime keeps such a grant only in the process that was asked, so a respawned worker is
+    /// given them again.
+    pub allow_rules: Vec<String>,
+}
+
+/// A tool the runtime asked the host to approve before running it. The worker waits for the
+/// answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PermissionAsk {
+    /// The runtime's id for the request, echoed back in the answer.
+    pub request_id: String,
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub description: String,
+}
+
+/// A human's answer to a `PermissionAsk`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PermissionAnswer {
+    /// Run this one call. `rule`, when set, also allows what it covers for the rest of the run.
+    Allow { rule: Option<String> },
+    Deny { message: String },
 }
 
 /// A usage or rate limit the worker ran into, read from the runtime's structured output.
@@ -71,6 +95,14 @@ pub trait Worker: Send {
     /// command), each as a short description. The engine tells a human about new ones.
     fn take_denials(&mut self) -> Vec<String> {
         Vec::new()
+    }
+    /// Tools the runtime is waiting on the host to approve, since the last call.
+    fn take_permission_asks(&mut self) -> Vec<PermissionAsk> {
+        Vec::new()
+    }
+    /// Answer an ask and let the worker carry on. Errors when the worker cannot be reached.
+    fn answer_permission(&mut self, _request_id: &str, _answer: &PermissionAnswer) -> std::io::Result<()> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "worker asks no permissions"))
     }
 }
 

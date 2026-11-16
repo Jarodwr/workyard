@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ESTIMATE_CAP, estimateProgress, progressDisplay } from "../src/lib/agents.ts";
+import { ESTIMATE_CAP, estimateProgress, permissionsFor, progressDisplay, runRuleFor } from "../src/lib/agents.ts";
 
 const running = (progress, extra = {}) => ({
   progress,
@@ -32,4 +32,19 @@ test("a running card at 0 shows an estimate", () => {
 test("a paused card at 0 stays at 0", () => {
   const card = running(0, { paused: true, tool_uses: 20 });
   assert.deepEqual(progressDisplay(card), { value: 0, estimated: false });
+});
+
+test("allow-for-this-run grants a command's first word, or the whole tool", () => {
+  assert.equal(runRuleFor({ tool_name: "Bash", input: { command: "  make test --all" } }), "Bash(make *)");
+  assert.equal(runRuleFor({ tool_name: "Bash", input: {} }), "Bash");
+  assert.equal(runRuleFor({ tool_name: "WebFetch", input: { url: "https://x" } }), "WebFetch");
+});
+
+test("only pending requests on that card are shown", () => {
+  const requests = [
+    { id: "1", card_key: "C-1", status: "pending" },
+    { id: "2", card_key: "C-1", status: "denied" },
+    { id: "3", card_key: "C-2", status: "pending" },
+  ];
+  assert.deepEqual(permissionsFor({ key: "C-1" }, requests).map((r) => r.id), ["1"]);
 });

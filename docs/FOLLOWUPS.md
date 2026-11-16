@@ -25,9 +25,20 @@ Changes found or requested during the first real sample runs (a todo app built b
 ## Permissions and safety
 
 8. **Dangerous-auto workers.** **Done** (`orch run --permissions full|safe`, default `full`; shown in the toolbar).
-9. **Unblock a stalled worker in safe mode.** **Partial.** Refused tools are detected from the stream, notified once
-   and shown as `blocked: ...` on the card; `npm` and friends are on the safe allowlist. Not built: one-click Allow
-   once / for this run / Deny. `--permission-prompts host` is still unverified.
+9. **Unblock a stalled worker in safe mode.** **Done.** In `--permissions safe` workers run with
+   `--permission-prompts host --permission-prompt-tool stdio`, so Claude Code asks the orchestrator before a tool
+   that needs approval and waits (verified in the C-6 investigation: `--permission-prompts host` alone is not enough).
+   The orchestrator stores each ask as a `permission_requests` row and a `permission_requested` event, notifies, and
+   the agents dock shows **Allow once / Allow for this run / Deny** on the card. The decision is a
+   `permission_decided` event; the orchestrator answers the waiting worker on its stdin, so there is no restart.
+   Allow for this run grants a rule (a Bash command's first word, `Bash(touch *)`; any other tool by name) with
+   destination `session`: it lives in that worker process and is never written to a settings file. Grants are kept in
+   the database and passed as `--allowedTools` if the worker is respawned or resumed. Requests whose worker is gone
+   (exit, stop, orchestrator restart) become `expired`; the supervisor's own asks are denied at once. CLI:
+   `workyard orch perms list <board> [--status pending]` and `orch perms decide <id> allow-once|allow-run|deny
+   [--rule R] [--reason T]`; the supervisor and workers are refused. User and project allow rules in Claude settings
+   still bypass the host entirely. Not verified: rule shapes for non-Bash tools, and what Claude does if the host
+   never answers (it blocks).
 10. **Write/Edit, not Bash heredocs.** **Done** (worker prompt and plugin skill).
 
 ## Review

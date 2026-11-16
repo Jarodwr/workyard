@@ -49,6 +49,11 @@ fn epoch_of(actor: &str) -> Result<i64> {
     })
 }
 
+/// Require `actor` to be the current orchestrator of the board.
+pub(crate) fn check_epoch_for(db: &Connection, actor: &str, board_id: &str) -> Result<()> {
+    check_epoch(db, board_id, epoch_of(actor)?)
+}
+
 fn ensure_row(db: &Connection, board_id: &str) -> Result<()> {
     db.execute(
         "INSERT OR IGNORE INTO orchestrator_sessions(board_id,updated_at) VALUES (?1,?2)",

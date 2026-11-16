@@ -309,3 +309,30 @@ fn cli_permission_flags_become_claude_arguments() {
     assert!(text.contains("--permissions") && text.contains("[default: full]"), "{text}");
     assert!(text.contains("--allow"), "{text}");
 }
+
+#[test]
+fn cli_permission_requests_are_listed_and_only_a_human_may_decide_them() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("workyard-cli-perms-{nonce}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("board.db");
+    let run = |actor: &str, args: &[&str]| -> (bool, Value) {
+        let output = Command::new(env!("CARGO_BIN_EXE_workyard"))
+            .args(["--db", db.to_str().unwrap(), "--actor", actor, "--json"])
+            .args(args)
+            .output()
+            .unwrap();
+        (output.status.success(), serde_json::from_slice(&output.stdout).unwrap())
+    };
+    let (_, board) = run("human", &["plan", "create-board", "Perms"]);
+    let key = board["data"]["key"].as_str().unwrap();
+    let (ok, listed) = run("human", &["orch", "perms", "list", key, "--status", "pending"]);
+    assert!(ok && listed["data"] == serde_json::json!([]), "{listed}");
+    for (actor, code) in [("agent:supervisor-b-1", "forbidden_for_supervisor"), ("agent:claude-1", "forbidden_for_agents")] {
+        let (ok, refused) = run(actor, &["orch", "perms", "decide", "any", "allow-run"]);
+        assert!(!ok && refused["error"]["code"] == code, "{actor}: {refused}");
+    }
+    let (ok, missing) = run("human", &["orch", "perms", "decide", "nope", "deny"]);
+    assert!(!ok && missing["error"]["code"] == "not_found", "{missing}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
