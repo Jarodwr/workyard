@@ -559,6 +559,9 @@ fn workers_are_told_whether_they_get_a_worktree() {
     let launches = h.launches.lock().unwrap();
     let prompt = |key: &str| launches.iter().find(|l| l.0 == key).unwrap().2.clone();
     assert!(prompt(&code).contains("own git worktree"), "{}", prompt(&code));
+    assert!(prompt(&code).contains("merge --ff-only"), "workers integrate themselves: {}", prompt(&code));
+    assert!(!prompt(&code).contains("--review-required"), "review is opt-in, not the default");
+    assert!(prompt(&code).contains("Write and Edit tools"));
     assert!(prompt(&research).contains("investigative"), "{}", prompt(&research));
     assert!(!prompt(&research).contains("own git worktree"));
 }

@@ -509,11 +509,14 @@ fn claim_prompt(board: &str, key: &str, actor: &str, workspace: Workspace) -> St
     let place = match workspace {
         Workspace::Worktree => format!(
             "You work in your own git worktree on its own branch (see `git branch --show-current`); never touch another checkout. \
-Commit your work there. Once you have commits, record them with `workyard task link-change {key} <repository-id> <your-branch> --review-required` \
+Commit your work there. Once you have commits, record them with `workyard task link-change {key} <repository-id> <your-branch>` \
 (find the repository id with `workyard --json projects` then `workyard --json project <id>`), and run \
-`workyard task update-change <change> <commit>` after each further commit. A human reviews, merges, and approves the commit in the desktop app. \
-When your work is committed and recorded, run `workyard orch session pause {key} --for-review` and stop: you will be resumed once it is approved, \
-and then you finish with `workyard task move {key} Done`."
+`workyard task update-change <change> <commit>` after each further commit.\n\
+Done means integrated. Before finishing, in your worktree run `git merge main` (resolve any conflicts) and the project's tests. Then merge into the main branch \
+from the main checkout, which is the first entry of `git worktree list`: `git -C <that path> merge --ff-only <your-branch>`. If that fails because main \
+moved, run `git merge main` again and retry. Only then run `workyard task move {key} Done`.\n\
+If a human review is required for this card (a review gate shows on it), do not integrate yet: run `workyard orch session pause {key} --for-review` and stop. \
+You are resumed once it is approved; then integrate as above and finish."
         ),
         Workspace::None => format!(
             "This card is investigative: do not modify any repository. Report what you find with `workyard task note {key} \"...\"` \
@@ -523,13 +526,13 @@ and keep the status note current."
     format!(
         "You are working Workyard card {key} on board {board}. Your actor is {actor} (set in WORKYARD_ACTOR); \
 the card is already claimed by you, In Progress, with this session attached.\n\
-Use the `workyard` CLI (the workyard skill describes it). Read the card with `workyard --json card {key}`, \
+Create and change files with your Write and Edit tools, not shell heredocs: they are more reliable here. Use the `workyard` CLI (the workyard skill describes it). Read the card with `workyard --json card {key}`, \
 do the work, and report with `workyard task progress {key} <0-100> --note \"...\"`.\n\
 {place}\n\
 Messages that arrive while you work are notes a human left on this card; treat them as instructions about it.\n\
 If you need a human decision, raise it with `workyard task ask ... --blocks {key}`, then run \
 `workyard orch session pause {key} --waiting-question <Q-key>` and stop. You will be resumed with the answer.\n\
-When finished, run `workyard task move {key} Done`. Do not work on other cards."
+When finished (and, for code, integrated), run `workyard task move {key} Done`. Do not work on other cards."
     )
 }
 
@@ -542,7 +545,8 @@ fn resume_prompt(key: &str, pages: &[Value]) -> String {
         "Resume Workyard card {key}. You paused it earlier; it is In Progress and claimed by you again. \
 Re-read it with `workyard --json card {key}`. These board events happened since you last saw it, \
 including any answer to your question:\n{}\n\
-Continue the work. If you were waiting for review and it is approved, finish with `workyard task move {key} Done`. \
+Continue the work. If you were waiting for review and it is approved, integrate (`git merge main` in your worktree, run the tests, then \
+`git -C <main checkout> merge --ff-only <your-branch>`) and finish with `workyard task move {key} Done`. \
 If you must wait again, pause (`workyard orch session pause {key} --for-review` or `--waiting-question <Q-key>`) and stop.",
         serde_json::to_string(&events).unwrap_or_default()
     )
