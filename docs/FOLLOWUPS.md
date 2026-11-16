@@ -1,74 +1,70 @@
 # Follow-ups
 
-**Status (2026-11-16):** items 1 to 14 and 15 (except signing and the release dmg) are built and tested; 16 is still open. The second todo-app run on the new setup is the real test. Item 15 still needs the desktop to use the bundled CLI and plugin paths (`docs/PACKAGING.md`).
-
-Changes found or requested during the first real sample run (a todo app built by Claude workers through
-`workyard orch run`). Nothing here is built unless marked **done**. Do not start these while the sample run
-is still in progress unless asked.
+Changes found or requested during the first real sample runs (a todo app built by Claude workers through
+`workyard orch run`). Status as of 2026-11-17: **done** = built and tested; **partial** = built, with a stated gap;
+**open** = not built.
 
 ## Coordination and merging
 
-1. **Workyard-managed worktrees instead of `claude --worktree`.** Claude Code's worktree isolation blocks
-   `git -C <main checkout>`, so a worker cannot merge into `main` itself. Create the worktree with
-   `git worktree add` and start the worker in it with no path restriction. The worker prompt already says: merge
-   `main` into the branch, resolve conflicts, run the tests, `git -C <main> merge --ff-only <branch>`, and retry
-   if `main` moved. Untested without `--worktree`; a dirty main checkout makes the fast-forward fail, and the worker
-   should then stop and ask.
-2. **Done gate checks the commit is on the target branch** with git's ancestry check, not the agent's word.
-3. **Resume when the condition is met, not when a question is answered.** Each pause records what it waits for
-   (an answer, an approval, "my branch is on the target branch"), and the worker resumes only when all of it is
-   true. Reviews already work this way (`waiting_review` needs `can_finish`); generalise it.
-4. **Fast-failure guard: done in code** (`engine.rs`). Only a worker that dies with a failure status within the
-   window counts toward the board-wide pause; a clean exit without finishing counts against that card only.
-   The running orchestrator needs a restart to pick it up.
-5. **Do not raise a question for a mechanical blocker.** Q-2 and Q-3 were blockers dressed as decisions. Tell
-   workers to fix or report them, and ask only for real choices.
-6. **Merge trains.** On repositories with a train, the worker follows that repository's instructions; Workyard
-   keeps no queue of its own (git's fast-forward refusal serialises integrations).
+1. **Workyard-managed worktrees instead of `claude --worktree`.** **Done.** Worktrees live in
+   `<repo>/.workyard/worktrees/<card>`; workers merge their own work into the target branch. Proven by the second
+   todo run (all 8 cards merged by their workers). A dirty main checkout still makes the fast-forward fail; the worker
+   is told to stop and ask.
+2. **Done gate checks the commit is on the target branch.** **Done** (`not_integrated`).
+3. **Resume when the condition is met, not when a question is answered.** **Partial.** `--for-integration` is a new wait
+   kind that resumes only when the branch is on the target; review already worked this way. A plain question wait still
+   resumes as soon as the question is answered, whatever else is unresolved.
+4. **Fast-failure guard counts only failure exits.** **Done.**
+5. **No questions for mechanical blockers.** **Partial.** In the worker prompt only (nothing enforces it). The second
+   run raised none.
+6. **Merge trains.** **Partial.** The prompt tells workers to follow the repository's documented train; no train was
+   tested.
+7. **Recovery of detached cards.** **Done**: reclaimed up to 2 times per card per run, then a human is notified.
+   Proven by accident in the second run.
 
 ## Permissions and safety
 
-7. **Dangerous-auto workers.** Run workers with permission checks off. A visible setting, on by default for local
-   projects (a worktree isolates git state, not the machine).
-8. **Unblock a stalled worker** for the non-dangerous mode: surface "requires approval" tool results from the
-   stream, notify, offer Allow once / Allow for this run / Deny. Claude Code has `--permission-prompts host`
-   (wire format not yet verified, test first). Add `Bash(npm:*)` to the default allowlist.
-9. **Write/Edit, not Bash heredocs.** Added to the worker prompt (`engine.rs`); confirm it is in
-   `plugin/skills/workyard/SKILL.md` too.
+8. **Dangerous-auto workers.** **Done** (`orch run --permissions full|safe`, default `full`; shown in the toolbar).
+9. **Unblock a stalled worker in safe mode.** **Partial.** Refused tools are detected from the stream, notified once
+   and shown as `blocked: ...` on the card; `npm` and friends are on the safe allowlist. Not built: one-click Allow
+   once / for this run / Deny. `--permission-prompts host` is still unverified.
+10. **Write/Edit, not Bash heredocs.** **Done** (worker prompt and plugin skill).
 
 ## Review
 
-10. **Review off by default for local projects**, opt-in per project or board. The prompt should mention
-    `--review-required` only when review is on. Humans approve in the desktop; never approve for them.
+11. **Review off by default**, opt-in per board (`plan board-review`, settings popover). **Done.**
 
 ## Visibility
 
-11. **Live phase graph** that updates as things change, and an **animation on running cards** (a card whose
-    session exists and is not paused).
-12. **Agents window:** a collapsible right-hand dock on every board view, toggled from the toolbar with a
-    running-count badge. One row per agent: card, state, elapsed, last action, pending prompt. Expands to a log
-    tail with note, open-in-terminal and stop. The same live view in card detail. The orchestrator must publish
-    per-worker activity somewhere the desktop can read cheaply.
-13. **Progress reporting.** Workers rarely call `task progress`, so cards sit at 0%. Strengthen the prompt and/or
-    derive activity from the stream-json the runner already parses (last tool use, time since last event).
+12. **Live phase graph and running animation.** **Done** for the graph. Kanban cards have no running animation.
+13. **Agents dock.** **Done**, with a gap in checking: seen open with no agents; not yet seen with live agents, the log
+    tail, or the settings popover.
+14. **Progress reporting.** **Partial.** Each card now shows its last action live and the graph shows a progress bar,
+    but the percentage is still only what the agent reports (or 100 on Done), so bars sit at 0% while a card runs.
+    Idea: estimate from the stream, or have the prompt checkpoint progress at set points.
+15. **Wire routing in the graph.** **Done** (corridors, lanes, rounded corners, arrowheads mid-line). Where several
+    wires merge into one card their arrowheads overlap; not checked on a large board or at other zoom levels.
 
 ## Orchestrator agent
 
-14. **A long-running orchestrator agent beside the Rust script.** The script stays the reliable layer (lease,
-    pool, limits, backoff, starting and stopping processes). The agent is woken with events ("C-4 exited without
-    finishing", "integration conflict on C-6") and makes judgement calls through the `workyard` CLI: notes to
-    workers, resumes, holds, answering engineering questions, escalating business questions to a human, noticing
-    quiet cards. Open questions: does the agent hold the lease or act as a delegate of the script; how much may it
-    do without asking (suggest notes, resumes and retries first; merges, approvals and business answers stay human).
+16. **Supervisor agent beside the script.** **Done, opt-in** (`orch run --supervisor`). The script keeps the lease and
+    the processes; the supervisor is a delegate that acts through the CLI (notes, engineering answers with a
+    recommended option). It behaved well when the CLI was broken. Gaps: no toggle in the desktop; its limits are
+    enforced by its prompt, not by the core; never seen handling a real stuck worker.
 
 ## Delivery
 
-15. **Packaging.** Bundle the CLI as a sidecar, deliver the Claude plugin (`--plugin-dir`, marketplace), icons,
-    dmg, signing if shared.
-16. **Verify the desktop visually.** The Chrome extension was not connected, so the UI changes were never checked
-    in a browser.
+17. **Packaging.** **Partial.** Done: CLI sidecar, plugin marketplace manifest, bundled plugin, icons config, debug
+    `.app` build, `--plugin-dir` autodetection. Open: release build and dmg, signing and notarization (needs Apple
+    credentials), a real 1024px icon, `WORKYARD_BIN` exported to terminals opened from the desktop.
+18. **Verify the desktop visually.** **Partial.** Graph, toolbar, running chips and the opened dock were seen in the
+    real app on macOS. Not seen: dock with live agents, log tail, settings popover, graph at other zoom levels, the new
+    progress bar.
 
-## To finish the sample run first
+## New, found in the second run
 
-- Restart the orchestrator (picks up item 4), let C-4 finish (main already has its branch, Q-3 answered).
-- C-6, C-7, C-8 still to run. The user approves commits in the desktop for this run only.
+19. **Planner guidance.** Cards that overlap in scope (C-4 built what C-6 was meant to). Tell planners to split cards
+    by file or behaviour so they do not overlap.
+20. **A rebuilt `workyard` binary mid-run breaks workers.** Workers use the binary in the orchestrator's directory; a
+    rebuild during the run made every command fail with `schema_too_new` for a while. Copy the binary at start, or
+    point workers at a stable copy, and make the error say which side is older.
