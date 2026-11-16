@@ -2,6 +2,7 @@
 //! the core's `orchestrator_dispatch`, starts and resumes workers through a `Runner`, and
 //! repairs sessions whose worker exited without finishing or pausing.
 
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +47,9 @@ pub struct Options {
     pub supervisor: bool,
     /// Leave a finished card's worktree and branch in place instead of removing them.
     pub keep_worktrees: bool,
+    /// Environment variables for every worker, from `--worker-env`. They override the board's
+    /// stored defaults (`plan board-worker-env`) of the same name.
+    pub worker_env: BTreeMap<String, String>,
 }
 
 impl Default for Options {
@@ -66,6 +70,7 @@ impl Default for Options {
             permissions: "full".into(),
             supervisor: false,
             keep_worktrees: false,
+            worker_env: BTreeMap::new(),
         }
     }
 }
@@ -168,6 +173,8 @@ impl<'a> Orchestrator<'a> {
             self.store.orchestrator_set_permissions(&actor, &self.board, &self.opts.permissions),
             &self.board,
         );
+        let keys: Vec<String> = self.worker_env().into_keys().collect();
+        self.log_err(self.store.orchestrator_set_worker_env_keys(&actor, &self.board, &keys), &self.board);
         // The first run on a board starts from now rather than replaying its whole history.
         self.cursor = lease["cursor"].as_i64().unwrap_or(0);
         if self.cursor == 0 {
@@ -432,6 +439,13 @@ impl<'a> Orchestrator<'a> {
         Ok(())
     }
 
+    /// What a worker is started with: the board's stored defaults, then this run's flags.
+    fn worker_env(&self) -> BTreeMap<String, String> {
+        let mut env = self.store.board_worker_env(&self.board).unwrap_or_default();
+        env.extend(self.opts.worker_env.clone());
+        env
+    }
+
     /// Start a worker. A failure to start counts like a failed run.
     fn launch(
         &mut self,
@@ -452,6 +466,7 @@ impl<'a> Orchestrator<'a> {
             resume,
             workspace,
             allow_rules: self.store.permission_run_rules(key).unwrap_or_default(),
+            env: self.worker_env(),
         };
         match self.runner.start(&launch) {
             Ok(worker) => {
@@ -818,6 +833,7 @@ impl<'a> Orchestrator<'a> {
                 resume: false,
                 workspace: Workspace::None,
                 allow_rules: Vec::new(),
+                env: self.worker_env(),
             };
             match self.runner.start(&launch) {
                 Ok(worker) => self.supervisor = Some(Live { worker, started: Instant::now() }),

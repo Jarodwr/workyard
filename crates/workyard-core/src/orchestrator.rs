@@ -5,6 +5,8 @@
 //! write whose actor carries a stale epoch, so a suspended orchestrator cannot act after
 //! it was replaced. Lease expiry alone is not the guarantee.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -145,7 +147,7 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
     let key: String = db.query_row("SELECT key FROM boards WHERE id=?1", [board_id], |r| r.get(0))?;
     let row = db
         .query_row(
-            "SELECT desired_state,cursor,pool_size,holder,host,pid,epoch,heartbeat_at,lease_expires_at,backoff_until,backoff_reason,permissions,binary_version,schema_version FROM orchestrator_sessions WHERE board_id=?1",
+            "SELECT desired_state,cursor,pool_size,holder,host,pid,epoch,heartbeat_at,lease_expires_at,backoff_until,backoff_reason,permissions,binary_version,schema_version,worker_env_keys FROM orchestrator_sessions WHERE board_id=?1",
             [board_id],
             |r| {
                 Ok(json!({
@@ -159,12 +161,13 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
                     "permissions": r.get::<_, String>(11)?,
                     "binary_version": r.get::<_, Option<String>>(12)?,
                     "schema_version": r.get::<_, Option<i64>>(13)?,
+                    "worker_env_keys": serde_json::from_str::<Value>(&r.get::<_, String>(14)?).unwrap_or_else(|_| json!([])),
                 }))
             },
         )
         .optional()?
         .unwrap_or_else(|| {
-            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"binary_version":null,"schema_version":null,"backoff_until":null,"backoff_reason":"","permissions":"full"})
+            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"binary_version":null,"schema_version":null,"backoff_until":null,"backoff_reason":"","permissions":"full","worker_env_keys":[]})
         });
     let mut row = row;
     let epoch = row["epoch"].as_i64().unwrap_or(0);
@@ -196,7 +199,77 @@ fn active_workers(db: &Connection, board_id: &str) -> Result<i64> {
     )?)
 }
 
+/// The board's stored worker environment, by name.
+fn board_worker_env(db: &Connection, board_id: &str) -> Result<BTreeMap<String, String>> {
+    let text: String = db.query_row("SELECT worker_env FROM boards WHERE id=?1", [board_id], |r| r.get(0))?;
+    Ok(serde_json::from_str(&text).unwrap_or_default())
+}
+
+/// Split `KEY=VALUE`. Names are shell-style identifiers; `WORKYARD_*` is reserved for the
+/// variables the orchestrator sets itself.
+pub fn parse_env_pair(text: &str) -> Result<(String, String)> {
+    let (key, value) = text.split_once('=').ok_or_else(|| {
+        Error::new("validation_error", format!("expected KEY=VALUE, got `{text}`"))
+    })?;
+    let valid = key.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid {
+        return Err(Error::new("validation_error", format!("`{key}` is not a valid environment variable name")));
+    }
+    if key.starts_with("WORKYARD_") {
+        return Err(Error::new("validation_error", "WORKYARD_* variables are set by the orchestrator"));
+    }
+    Ok((key.to_owned(), value.to_owned()))
+}
+
 impl Store {
+    /// The environment every worker of the board starts with: the board's stored defaults.
+    pub fn board_worker_env(&self, board: &str) -> Result<BTreeMap<String, String>> {
+        let db = self.open()?;
+        let board_id = resolve_board(&db, board)?;
+        board_worker_env(&db, &board_id)
+    }
+
+    /// Set (`set`) and remove (`unset`) the board's default worker variables. The event and
+    /// the result carry names only. The values sit in the database, so keep secrets out.
+    pub fn set_board_worker_env(&self, actor: &str, board: &str, set: &[(String, String)], unset: &[String]) -> Result<Value> {
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_board_active(&tx, &board_id)?;
+        let before = board_worker_env(&tx, &board_id)?;
+        let mut env = before.clone();
+        for key in unset {
+            env.remove(key);
+        }
+        env.extend(set.iter().cloned());
+        let names = |e: &BTreeMap<String, String>| json!({"worker_env_keys": e.keys().collect::<Vec<_>>()});
+        if env != before {
+            tx.execute(
+                "UPDATE boards SET worker_env=?2,version=version+1 WHERE id=?1",
+                params![board_id, serde_json::to_string(&env).unwrap_or_else(|_| "{}".into())],
+            )?;
+            record(&tx, actor, "board_worker_env_changed", &board_id, "board", &board_id, Some(&names(&before)), Some(&names(&env)), &[], "")?;
+        }
+        self.commit(tx)?;
+        Ok(names(&env))
+    }
+
+    /// Record the variable names this orchestrator passes to workers (never the values).
+    pub fn orchestrator_set_worker_env_keys(&self, actor: &str, board: &str, keys: &[String]) -> Result<()> {
+        let epoch = epoch_of(actor)?;
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_epoch(&tx, &board_id, epoch)?;
+        tx.execute(
+            "UPDATE orchestrator_sessions SET worker_env_keys=?2,updated_at=?3 WHERE board_id=?1",
+            params![board_id, serde_json::to_string(keys).unwrap_or_else(|_| "[]".into()), now()],
+        )?;
+        self.commit(tx)?;
+        Ok(())
+    }
+
     /// Workers on the board that are attached and not paused (running, or about to).
     pub fn orchestrator_active_workers(&self, board: &str) -> Result<i64> {
         let db = self.open()?;
@@ -210,6 +283,7 @@ impl Store {
         let mut row = session_row(&db, &board_id)?;
         let held = crate::phases::held_back_by_phase(&db, &board_id)?;
         row["phase_window"] = crate::phases::phase_window(&db, &board_id)?.into();
+        row["board_worker_env_keys"] = json!(board_worker_env(&db, &board_id)?.keys().collect::<Vec<_>>());
         row["held_back_by_phase"] = json!(held.len());
         row["held_back_cards"] = json!(held);
         Ok(row)

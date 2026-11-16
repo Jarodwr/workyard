@@ -16,6 +16,7 @@ mod orchestrator;
 mod permissions;
 pub use orchestrator::DEFAULT_LEASE_SECONDS;
 mod phases;
+pub use orchestrator::parse_env_pair;
 pub use phases::parse_phase_window;
 mod projects;
 mod sessions;
@@ -1718,7 +1719,7 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
-pub(crate) const SCHEMA_VERSION: i64 = 20;
+pub(crate) const SCHEMA_VERSION: i64 = 21;
 /// Largest markdown report a card may hold.
 pub const MAX_REPORT_BYTES: usize = 256 * 1024;
 
@@ -1941,6 +1942,15 @@ fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 20")?;
+        version = 20;
+    }
+    if version == 20 {
+        tx.execute_batch(include_str!("../migrations/021.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (21,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 21")?;
     }
     tx.commit()?;
     Ok(())

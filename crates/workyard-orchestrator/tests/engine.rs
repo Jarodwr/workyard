@@ -110,6 +110,7 @@ impl Runner for FakeRunner {
             resume: launch.resume,
             workspace: launch.workspace,
             allow_rules: launch.allow_rules.clone(),
+            env: launch.env.clone(),
         };
         std::thread::spawn(move || {
             behavior(&launch, &store);
@@ -945,4 +946,36 @@ fn keep_worktrees_leaves_them_in_place() {
     h.finish(handle);
     assert!(repo.join(".workyard/worktrees").join(key.to_lowercase()).exists());
     let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn workers_get_board_env_with_run_flags_overriding_and_status_shows_only_names() {
+    let h = Harness::new();
+    h.store
+        .set_board_worker_env("ui", &h.board, &[("CARGO_TARGET_DIR".into(), "/tmp/board".into()), ("A".into(), "1".into())], &[])
+        .unwrap();
+    h.card("Env");
+    let seen = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&seen);
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            idle_wait: Duration::from_millis(40),
+            worker_env: [("CARGO_TARGET_DIR".to_owned(), "/tmp/run".to_owned())].into(),
+            ..Options::default()
+        },
+        move |launch, store| {
+            *sink.lock().unwrap() = Some(launch.env.clone());
+            finish_card(launch, store);
+        },
+    );
+    h.wait("done", |s| h.done_count(s) == 1);
+    let status = h.store.orchestrator_status(&h.board).unwrap();
+    h.finish(handle);
+    let env = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(env["CARGO_TARGET_DIR"], "/tmp/run");
+    assert_eq!(env["A"], "1");
+    assert_eq!(status["worker_env_keys"], serde_json::json!(["A", "CARGO_TARGET_DIR"]));
+    assert!(!status.to_string().contains("/tmp/run"), "values never appear in status");
 }
