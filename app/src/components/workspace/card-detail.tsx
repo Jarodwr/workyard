@@ -192,11 +192,7 @@ export function CardDetail({
                 </UiCard>
               </div>
               <section className="mt-4 space-y-2">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">Agent progress</h3>
-                  <span className="font-mono text-xs tabular-nums text-muted-foreground">{card.progress}%</span>
-                </div>
-                <Progress value={card.progress} />
+                <h3 className="text-sm font-semibold">Status</h3>
                 <p className="text-xs text-muted-foreground">{card.status_note || "No status update yet."}</p>
               </section>
               {card.blocked && (
