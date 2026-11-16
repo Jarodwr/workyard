@@ -558,7 +558,8 @@ mod tests {
     fn a_can_use_tool_request_is_an_ask_and_other_control_requests_are_not() {
         // Shape captured in the C-6 investigation (claude 2.1.304).
         let line = json!({"type":"control_request","request_id":"491dcfcf","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"touch /tmp/a.txt"},"description":"Create empty file a.txt","tool_use_id":"toolu_01"}});
-        let [Observed::Ask(ask)] = observe(&line).as_slice() else { panic!("{:?}", observe(&line)) };
+        let seen = observe(&line);
+        let [Observed::Ask(ask)] = seen.as_slice() else { panic!("{seen:?}") };
         assert_eq!((ask.request_id.as_str(), ask.tool_name.as_str(), ask.description.as_str()), ("491dcfcf", "Bash", "Create empty file a.txt"));
         assert_eq!(ask.input["command"], "touch /tmp/a.txt");
         assert!(observe(&json!({"type":"control_request","request_id":"x","request":{"subtype":"hook_callback"}})).is_empty());
