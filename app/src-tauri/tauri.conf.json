@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.workyard.app",
   "build": {
-    "beforeDevCommand": "yarn dev",
+    "beforeDevCommand": "../scripts/stage-sidecar.sh --debug && yarn dev",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "yarn build",
+    "beforeBuildCommand": "../scripts/stage-sidecar.sh && yarn build",
     "frontendDist": "../dist"
   },
   "app": {
