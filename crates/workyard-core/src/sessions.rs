@@ -78,23 +78,36 @@ pub(crate) fn resume_eligible(db: &Connection, card: &Value, session: &Value) ->
     {
         return Ok(false);
     }
+    // Every recorded wait must hold; a pause with none only needs the card to be ready.
+    let mut waits = false;
     if let Some(question_id) = session["waiting_question_id"].as_str() {
+        waits = true;
         let status: String = db.query_row(
             "SELECT status FROM questions WHERE id=?1",
             [question_id],
             |row| row.get(0),
         )?;
-        Ok(status != "open")
-    } else if session["waiting_review"] == true {
-        // Waiting for review: not before the card can actually finish.
-        Ok(card["ready"] == true && card["can_finish"] == true)
-    } else if session["waiting_integration"] == true {
-        // Waiting for a merge: not before the work is actually on the target branch.
-        Ok(card["ready"] == true
-            && crate::projects::unintegrated_changes(db, card["id"].as_str().unwrap_or_default())?.is_empty())
-    } else {
-        Ok(card["ready"] == true)
+        if status == "open" {
+            return Ok(false);
+        }
     }
+    if session["waiting_review"] == true {
+        // Waiting for review: not before the card can actually finish.
+        waits = true;
+        if !(card["ready"] == true && card["can_finish"] == true) {
+            return Ok(false);
+        }
+    }
+    if session["waiting_integration"] == true {
+        // Waiting for a merge: not before the work is actually on the target branch.
+        waits = true;
+        if !(card["ready"] == true
+            && crate::projects::unintegrated_changes(db, card["id"].as_str().unwrap_or_default())?.is_empty())
+        {
+            return Ok(false);
+        }
+    }
+    Ok(waits || card["ready"] == true)
 }
 
 pub(crate) fn detach_for_card(db: &Connection, card_id: &str) -> Result<()> {
@@ -197,9 +210,6 @@ impl Store {
         waiting_review: bool,
         waiting_integration: bool,
     ) -> Result<Value> {
-        if [waiting_review, waiting_integration, waiting_question.is_some()].iter().filter(|w| **w).count() > 1 {
-            return Err(Error::new("validation_error", "wait for one thing: a question, review, or integration"));
-        }
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let card_id = resolve_card(&tx, card)?;
