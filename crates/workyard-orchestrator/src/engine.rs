@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::notify::{Notifier, Silent};
 use crate::runner::{LimitHit, Launch, PermissionAnswer, PermissionAsk, Runner, Worker, WorkerState, Workspace};
-use crate::worktree::{branch_for, current_branch, remove_merged, worktree_path};
+use crate::worktree::{branch_for, check_main_checkout, current_branch, remove_merged, worktree_path};
 
 pub struct Options {
     pub holder: String,
@@ -107,6 +107,10 @@ pub struct Orchestrator<'a> {
     reclaims: HashMap<String, u32>,
     /// Cards moved to Done whose worktree and branch are still to be removed.
     cleanup: HashSet<String>,
+    /// The branch the main checkout was on when the run started; workers merge into it.
+    expected_branch: Option<String>,
+    /// The main-checkout problem already announced, so each distinct one notifies once.
+    checkout_problem: Option<String>,
 }
 
 struct Live {
@@ -136,6 +140,8 @@ impl<'a> Orchestrator<'a> {
             denials_seen: HashSet::new(),
             reclaims: HashMap::new(),
             cleanup: HashSet::new(),
+            expected_branch: None,
+            checkout_problem: None,
         }
     }
 
@@ -170,6 +176,7 @@ impl<'a> Orchestrator<'a> {
         }
         // Requests left by a previous orchestrator have no worker waiting on them.
         self.expire_permission_requests(&actor, None);
+        self.expected_branch = self.runner.checkout().as_deref().and_then(current_branch);
         let result = self.main_loop(&actor, stop);
         self.shutdown(&actor);
         result
@@ -364,7 +371,38 @@ impl<'a> Orchestrator<'a> {
         }
     }
 
+    /// Whether the main checkout can take a worker's fast-forward. A problem is announced once
+    /// (notification, log, supervisor) and dispatch waits; it is re-checked every pass, so work
+    /// resumes as soon as the checkout is put right.
+    fn main_checkout_ready(&mut self) -> bool {
+        let Some(main) = self.runner.checkout() else { return true };
+        match check_main_checkout(&main, self.expected_branch.as_deref()) {
+            Ok(()) => {
+                if self.checkout_problem.take().is_some() {
+                    eprintln!("main checkout is fine again; dispatching resumes");
+                    self.tell_supervisor("The main checkout is fine again; dispatch has resumed.".into());
+                }
+                true
+            }
+            Err(problem) => {
+                if self.checkout_problem.as_deref() != Some(&problem) {
+                    eprintln!("not dispatching: {problem}");
+                    self.notifier.notify(
+                        "Workyard: dispatch is waiting on the main checkout",
+                        &format!("{problem}. Workers merge into it, so no new card starts until it is clean, on its branch and not mid-merge."),
+                    );
+                    self.tell_supervisor(format!("Dispatch is paused: {problem}."));
+                    self.checkout_problem = Some(problem);
+                }
+                false
+            }
+        }
+    }
+
     fn dispatch_all(&mut self, actor: &str, stop: &AtomicBool) -> Result<()> {
+        if !self.main_checkout_ready() {
+            return Ok(());
+        }
         while !stop.load(Ordering::SeqCst) {
             let session_id = uuid::Uuid::new_v4().to_string();
             let worker = format!("agent:{}-{}", self.runner.name(), &session_id[..8]);

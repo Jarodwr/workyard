@@ -39,6 +39,52 @@ pub fn current_branch(main: &Path) -> Option<String> {
         .map(|(_, out, _)| out)
 }
 
+/// Whether the main checkout can take a worker's fast-forward: on `expected` (when known),
+/// not mid-merge, rebase, cherry-pick or revert, and clean apart from untracked files under
+/// `.workyard`. `Err` says what is wrong, in a line fit for a notification.
+pub fn check_main_checkout(main: &Path, expected: Option<&str>) -> Result<(), String> {
+    let (ok, dir, err) = git(main, &["rev-parse", "--git-dir"]).map_err(|e| e.to_string())?;
+    if !ok {
+        return Err(format!("the main checkout is not a git repository: {err}"));
+    }
+    let git_dir = if Path::new(&dir).is_absolute() { PathBuf::from(dir) } else { main.join(dir) };
+    for (marker, what) in [
+        ("MERGE_HEAD", "a merge"),
+        ("rebase-merge", "a rebase"),
+        ("rebase-apply", "a rebase or am"),
+        ("CHERRY_PICK_HEAD", "a cherry-pick"),
+        ("REVERT_HEAD", "a revert"),
+    ] {
+        if git_dir.join(marker).exists() {
+            return Err(format!("the main checkout is in the middle of {what}"));
+        }
+    }
+    match (current_branch(main), expected) {
+        (None, _) => return Err("the main checkout has a detached HEAD".into()),
+        (Some(now), Some(want)) if now != want => {
+            return Err(format!("the main checkout is on {now}, not {want}"));
+        }
+        _ => {}
+    }
+    let (ok, status, err) = git(main, &["status", "--porcelain"]).map_err(|e| e.to_string())?;
+    if !ok {
+        return Err(format!("could not read the main checkout's status: {err}"));
+    }
+    let dirty: Vec<&str> = status
+        .lines()
+        .filter(|line| !line.get(3..).is_some_and(|path| path.trim_matches('"').starts_with(".workyard/")))
+        .collect();
+    if let Some(first) = dirty.first() {
+        return Err(format!(
+            "the main checkout has uncommitted changes ({} path{}, e.g. {})",
+            dirty.len(),
+            if dirty.len() == 1 { "" } else { "s" },
+            first.get(3..).unwrap_or(first)
+        ));
+    }
+    Ok(())
+}
+
 fn exclude_workyard_dir(main: &Path) -> io::Result<()> {
     let (ok, dir, err) = git(main, &["rev-parse", "--git-common-dir"])?;
     if !ok {
@@ -332,6 +378,54 @@ mod tests {
         let err = remove_merged(&main, "C-12").unwrap_err().to_string();
         assert!(err.contains("not merged"), "{err}");
         assert!(path.join("a.txt").exists());
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn a_clean_main_checkout_on_its_branch_is_fine() {
+        let main = repo();
+        assert_eq!(check_main_checkout(&main, Some("main")), Ok(()));
+        ensure_worktree(&main, "C-20").unwrap();
+        std::fs::write(main.join(".workyard/note.txt"), "x").unwrap();
+        assert_eq!(check_main_checkout(&main, Some("main")), Ok(()), ".workyard is ignored");
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn a_dirty_main_checkout_is_refused() {
+        let main = repo();
+        std::fs::write(main.join("stray.txt"), "x").unwrap();
+        let err = check_main_checkout(&main, Some("main")).unwrap_err();
+        assert!(err.contains("uncommitted") && err.contains("stray.txt"), "{err}");
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn the_wrong_or_a_detached_branch_is_refused() {
+        let main = repo();
+        assert!(git(&main, &["checkout", "-q", "-b", "other"]).unwrap().0);
+        let err = check_main_checkout(&main, Some("main")).unwrap_err();
+        assert!(err.contains("on other, not main"), "{err}");
+        assert_eq!(check_main_checkout(&main, None), Ok(()));
+        assert!(git(&main, &["checkout", "-q", "--detach"]).unwrap().0);
+        assert!(check_main_checkout(&main, None).unwrap_err().contains("detached"));
+        let _ = std::fs::remove_dir_all(&main);
+    }
+
+    #[test]
+    fn a_main_checkout_in_the_middle_of_a_merge_is_refused() {
+        let main = repo();
+        commit_in(&main, "a.txt");
+        assert!(git(&main, &["checkout", "-q", "-b", "side", "HEAD~1"]).unwrap().0);
+        std::fs::write(main.join("a.txt"), "other").unwrap();
+        assert!(git(&main, &["add", "-A"]).unwrap().0);
+        assert!(git(&main, &["commit", "-q", "-m", "side"]).unwrap().0);
+        assert!(git(&main, &["checkout", "-q", "main"]).unwrap().0);
+        assert!(!git(&main, &["merge", "side"]).unwrap().0, "the merge must conflict");
+        let err = check_main_checkout(&main, Some("main")).unwrap_err();
+        assert!(err.contains("middle of a merge"), "{err}");
+        assert!(git(&main, &["merge", "--abort"]).unwrap().0);
+        assert_eq!(check_main_checkout(&main, Some("main")), Ok(()));
         let _ = std::fs::remove_dir_all(&main);
     }
 
