@@ -1941,3 +1941,49 @@ fn supervisor_limits_are_enforced_in_the_core() {
     // A human is unaffected.
     store.resolve_question("ui", &k(&biz), "B", None, 1, false).unwrap();
 }
+
+/// Put the database back to schema 16, as an older binary leaves it: no version on the lease.
+fn downgrade_to_16(dir: &TempDir) {
+    let db = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    db.execute_batch("ALTER TABLE orchestrator_sessions DROP COLUMN binary_version; ALTER TABLE orchestrator_sessions DROP COLUMN schema_version; DELETE FROM schema_version WHERE version=17; PRAGMA user_version = 16").unwrap();
+}
+
+#[test]
+fn lease_records_the_binary_version_and_release_clears_it() {
+    let (_dir, store, board) = setup();
+    let lease = store.orchestrator_acquire(&board, "run", "h", None, 30, None).unwrap();
+    assert_eq!(lease["binary_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(lease["schema_version"], 17);
+    let released = store.orchestrator_release(lease["actor"].as_str().unwrap(), &board).unwrap();
+    assert!(released["schema_version"].is_null());
+}
+
+#[test]
+fn migration_is_refused_under_a_live_older_orchestrator_unless_allowed() {
+    let (dir, store, board) = setup();
+    store.orchestrator_acquire(&board, "run", "h", None, 300, None).unwrap();
+    downgrade_to_16(&dir);
+    let err = store.list_boards().unwrap_err();
+    assert_eq!(err.code, "migration_blocked");
+    assert!(err.message.contains("run"), "{}", err.message);
+    assert!(err.hint.as_deref().unwrap().contains("--allow-migrate"));
+    // Still blocked, and the database was not touched.
+    assert_eq!(store.list_boards().unwrap_err().code, "migration_blocked");
+    let migrated = Store::new(dir.path().join("test.db")).allow_migrate(true);
+    migrated.list_boards().unwrap();
+    store.list_boards().unwrap();
+}
+
+#[test]
+fn migration_proceeds_when_the_older_lease_is_released_or_dead() {
+    let (dir, store, board) = setup();
+    let lease = store.orchestrator_acquire(&board, "run", "h", None, 300, None).unwrap();
+    store.orchestrator_release(lease["actor"].as_str().unwrap(), &board).unwrap();
+    downgrade_to_16(&dir);
+    store.list_boards().unwrap();
+
+    // A holder on this host whose process is gone does not block either.
+    store.orchestrator_acquire(&board, "run", "h", Some(999_999_999), 300, None).unwrap();
+    downgrade_to_16(&dir);
+    store.list_boards().unwrap();
+}
