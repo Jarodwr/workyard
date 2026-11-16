@@ -310,6 +310,12 @@ fn hold_session(card: String) -> Result<Value, String> {
     wrap(store()?.hold_task_session("ui", &card, &who))
 }
 
+/// Choose how workers bring a card branch onto the target: `merge` or `rebase`.
+#[tauri::command]
+fn set_board_integration(board: String, integration: String) -> Result<Value, String> {
+    wrap(store()?.set_board_integration("ui", &board, &integration))
+}
+
 /// Require (or stop requiring) human review of the code changes on a board's cards.
 #[tauri::command]
 fn set_board_review_required(board: String, required: bool) -> Result<Value, String> {
@@ -517,6 +523,7 @@ fn main() {
             hold_session,
             agent_log_tail,
             set_board_review_required,
+            set_board_integration,
             orchestrator_status,
             set_orchestrator_state,
             pending_permissions,

@@ -334,6 +334,7 @@ export default function App() {
               onHold={(card) => mutate(() => client.holdSession(card.key))}
               onAddNote={(card, body) => mutate(() => client.addCardNote(card.key, body))}
               onReviewRequired={(required) => void mutate(() => client.setBoardReviewRequired(board.key, required))}
+              onIntegration={(integration) => void mutate(() => client.setBoardIntegration(board.key, integration))}
               onOpen={setSelectedId}
               onAnswer={(question, answer, note) => mutate(() => client.answerQuestion(question, answer, note))}
               onAssignStakeholder={(question, stakeholderId) => mutate(() => stakeholderId ? client.assignQuestionStakeholder(question, stakeholderId) : client.unassignQuestionStakeholder(question))}

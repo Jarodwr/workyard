@@ -262,6 +262,12 @@ enum ReviewSetting {
     Off,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum IntegrationSetting {
+    Merge,
+    Rebase,
+}
+
 /// How much workers may do without asking.
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Permissions {
@@ -293,6 +299,9 @@ enum PlanCommand {
     /// How many phases past the current one workers may be dispatched from: a number, or
     /// `all` (the default). 1 offers the next phase only once the current one has no ready work.
     BoardPhaseWindow { board: String, window: String },
+    /// How workers bring a card branch onto the target: `merge` the target into it (default;
+    /// leaves a merge commit) or `rebase` it onto the target (linear history).
+    BoardIntegration { board: String, setting: IntegrationSetting },
     AttachBoard {
         board: String,
         project: String,
@@ -861,6 +870,13 @@ fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::
         }
         PlanCommand::BoardReview { board, setting } => {
             store.set_board_review_required(actor, &board, matches!(setting, ReviewSetting::On))?
+        }
+        PlanCommand::BoardIntegration { board, setting } => {
+            let setting = match setting {
+                IntegrationSetting::Merge => "merge",
+                IntegrationSetting::Rebase => "rebase",
+            };
+            store.set_board_integration(actor, &board, setting)?
         }
         PlanCommand::BoardPhaseWindow { board, window } => {
             let window = workyard_core::parse_phase_window(&window)?;

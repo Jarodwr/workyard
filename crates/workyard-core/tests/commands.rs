@@ -338,7 +338,7 @@ fn v7_database_gets_phases_and_preserves_existing_work() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        20
     );
 }
 
@@ -861,7 +861,7 @@ fn existing_v1_database_migrates_to_agent_types_and_notes() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, 20);
 }
 
 #[test]
@@ -2015,7 +2015,7 @@ fn lease_records_the_binary_version_and_release_clears_it() {
     let (_dir, store, board) = setup();
     let lease = store.orchestrator_acquire(&board, "run", "h", None, 30, None).unwrap();
     assert_eq!(lease["binary_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(lease["schema_version"], 19);
+    assert_eq!(lease["schema_version"], 20);
     let released = store.orchestrator_release(lease["actor"].as_str().unwrap(), &board).unwrap();
     assert!(released["schema_version"].is_null());
 }

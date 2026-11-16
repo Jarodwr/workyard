@@ -146,6 +146,16 @@ fn a_card_without_changes_is_not_gated() {
 }
 
 #[test]
+fn integration_defaults_to_merge_and_can_be_rebase() {
+    let w = world();
+    assert_eq!(w.store.view_board(&w.board).unwrap()["integration"], "merge");
+    assert_eq!(w.store.set_board_integration("human", &w.board, "rebase").unwrap()["integration"], "rebase");
+    assert_eq!(w.store.view_board(&w.board).unwrap()["integration"], "rebase");
+    assert_eq!(w.store.set_board_integration("human", &w.board, "merge").unwrap()["integration"], "merge");
+    assert_eq!(w.store.set_board_integration("human", &w.board, "squash").unwrap_err().code, "invalid_integration");
+}
+
+#[test]
 fn review_follows_the_board_unless_the_change_says_otherwise() {
     let w = world();
     let (plain, plain_change) = w.working_card("Plain", "p", None);

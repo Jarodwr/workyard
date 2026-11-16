@@ -1718,7 +1718,7 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
-pub(crate) const SCHEMA_VERSION: i64 = 19;
+pub(crate) const SCHEMA_VERSION: i64 = 20;
 /// Largest markdown report a card may hold.
 pub const MAX_REPORT_BYTES: usize = 256 * 1024;
 
@@ -1932,6 +1932,15 @@ fn migrate(db: &mut Connection, allow_migrate: bool) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 19")?;
+        version = 19;
+    }
+    if version == 19 {
+        tx.execute_batch(include_str!("../migrations/020.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (20,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 20")?;
     }
     tx.commit()?;
     Ok(())
@@ -2063,7 +2072,7 @@ fn ensure_work_lane(db: &Connection, lane_id: &str) -> Result<()> {
     }
 }
 fn board_row(db: &Connection, id: &str) -> Result<Value> {
-    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required,phase_window FROM boards WHERE id=?1", [id], |r| Ok(json!({"phase_window":r.get::<_,Option<i64>>(10)?,"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
+    Ok(db.query_row("SELECT id,key,name,description,created_at,archived,version,project_id,current_phase_id,review_required,phase_window,integration FROM boards WHERE id=?1", [id], |r| Ok(json!({"integration":r.get::<_,String>(11)?,"phase_window":r.get::<_,Option<i64>>(10)?,"review_required":r.get::<_,i64>(9)?!=0,"id":r.get::<_,String>(0)?,"key":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,"description":r.get::<_,String>(3)?,"created_at":r.get::<_,String>(4)?,"archived":r.get::<_,i64>(5)?!=0,"version":r.get::<_,i64>(6)?,"project_id":r.get::<_,Option<String>>(7)?,"current_phase_id":r.get::<_,Option<String>>(8)?})))?)
 }
 fn card_row(db: &Connection, id: &str) -> Result<Value> {
     Ok(serde_json::to_value(card_snapshot(db, id)?)?)

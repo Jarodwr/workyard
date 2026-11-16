@@ -50,7 +50,7 @@ export type Card = {
 };
 export type Lane = { id: string; name: string; kind: string; position: number; version: number; cards: Card[] };
 export type Phase = { id: string; board_id: string; name: string; description: string; version: number; closed_at: string | null; position: number; status: "closed" | "current" | "future" };
-export type Board = { id: string; key: string; name: string; description: string; version: number; archived: boolean; review_required?: boolean; project_id?: string | null; current_phase_id?: string | null; phases: Phase[]; lanes: Lane[] };
+export type Board = { id: string; key: string; name: string; description: string; version: number; archived: boolean; review_required?: boolean; integration?: "merge" | "rebase"; project_id?: string | null; current_phase_id?: string | null; phases: Phase[]; lanes: Lane[] };
 export type ProjectListItem = { id: string; name: string; description: string; version: number; board_count: number };
 export type Project = ProjectListItem & {
   boards: { id: string; key: string; name: string; description: string; archived: boolean }[];
@@ -97,6 +97,7 @@ export const api = {
   releaseSessionHold: (card: string) => invoke<TaskSession>("release_session_hold", { card }),
   holdSession: (card: string) => invoke<TaskSession>("hold_session", { card }),
   agentLogTail: (card: string, limit = 60) => invoke<AgentLogRow[]>("agent_log_tail", { card, limit }),
+  setBoardIntegration: (board: string, integration: "merge" | "rebase") => invoke<Board>("set_board_integration", { board, integration }),
   setBoardReviewRequired: (board: string, required: boolean) => invoke<Board>("set_board_review_required", { board, required }),
   approveChange: (change: CardChange) => invoke<CardChange>("approve_change", { change: change.id, expectedVersion: change.version }),
   orchestratorStatus: (board: string) => invoke<Orchestrator>("orchestrator_status", { board }),
@@ -183,6 +184,7 @@ const demoApi = {
     { kind: "tool", tool: "Bash", text: "node --test" },
     { kind: "result", text: "ℹ tests 10  ℹ pass 10  ℹ fail 0" },
   ],
+  setBoardIntegration: async (board: string, integration: "merge" | "rebase"): Promise<Board> => { const target = [demoBoard, demoRuntimeBoard, demoResearchBoard].find((item) => item.key === board || item.id === board) ?? demoBoard; target.integration = integration; demoEvent("board_integration_changed", target.id); return clone(target); },
   setBoardReviewRequired: async (board: string, required: boolean): Promise<Board> => { const target = [demoBoard, demoRuntimeBoard, demoResearchBoard].find((item) => item.key === board || item.id === board) ?? demoBoard; target.review_required = required; demoEvent("board_review_changed", target.id); return clone(target); },
   approveChange: async (change: CardChange): Promise<CardChange> => ({ ...clone(change), approved_commit_oid: change.commit_oid, reviewer: "demo", version: change.version + 1 }),
   orchestratorStatus: async (board: string): Promise<Orchestrator> => ({ ...clone(demoOrchestrator), board_key: board }),
