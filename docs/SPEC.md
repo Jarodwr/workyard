@@ -245,8 +245,8 @@ workyard task add-card <B-1> "Title" [--phase P]
 workyard task depend|undepend <C-1> --on <C-2|Q-3> [--scope start|finish]
 workyard task ask <B-1> "Title" --kind K --option A --option B --recommend A --why "..." [--blocks C-1]
 workyard task question-options <Q-3> ...
-workyard task link-change <C-1> <repo> <branch> [--review-required]
-workyard task update-change <change> <commit>
+workyard task link-change <C-1> <repo> <branch> [--review-required] [--expected-version N]   # version optional for the card's owner
+workyard task update-change <change> <commit> [--expected-version N]
 workyard task workspace <C-1> worktree|none      # also: task add-card --workspace none
 workyard task require-review <change> --required true|false
 
