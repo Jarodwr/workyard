@@ -86,6 +86,11 @@ enum Command {
     Project {
         project: String,
     },
+    /// Talk about an open question: read its thread and post to it. Only a human answers or drops it.
+    Question {
+        #[command(subcommand)]
+        command: QuestionCommand,
+    },
     Questions {
         board: Option<String>,
         #[arg(long)]
@@ -114,6 +119,14 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum QuestionCommand {
+    /// Post a message in the question's thread (a human message wakes the paused worker to reply).
+    Discuss { question: String, message: String },
+    /// The question with its options, recommendation and thread.
+    Show { question: String },
 }
 
 #[derive(Subcommand)]
@@ -691,6 +704,10 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
     Ok(match command {
         Command::Task { command } => run_task(store, actor, command)?,
         Command::Plan { command } => run_plan(store, actor, command)?,
+        Command::Question { command } => match command {
+            QuestionCommand::Discuss { question, message } => store.post_question_message(actor, &question, &message)?,
+            QuestionCommand::Show { question } => store.view_question(&question)?,
+        },
         Command::Orch { command } => run_orch(store, actor, command)?,
         Command::Admin { command } => run_admin(store, actor, command)?,
         Command::Doctor => unreachable!("handled in main"),
