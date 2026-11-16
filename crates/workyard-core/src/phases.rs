@@ -420,6 +420,7 @@ impl Store {
         reason: &str,
         expected: i64,
     ) -> Result<Value> {
+        crate::actor_policy::forbid_supervisor(actor, "cancel a card")?;
         require_nonblank("reason", reason)?;
         let mut db = self.open()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
