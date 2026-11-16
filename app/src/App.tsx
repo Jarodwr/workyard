@@ -89,11 +89,20 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
+    setOrchestrator(null);
     if (!boardKey) {
       setBoard(null);
       return;
     }
     let active = true;
+    void client
+      .orchestratorStatus(boardKey)
+      .then((value) => {
+        if (active) setOrchestrator(value);
+      })
+      .catch((e) => {
+        if (active) setError(errorMessage(e));
+      });
     void client
       .viewBoard(boardKey)
       .then((value) => {
@@ -148,6 +157,12 @@ export default function App() {
           events.push(...page.events);
           more = page.has_more;
         } while (more && active);
+        // Lease changes (an orchestrator exiting, its lease expiring) write no events, so
+        // read the status on every wake rather than only when something was written.
+        if (boardKey) {
+          const next = await client.orchestratorStatus(boardKey);
+          if (active) setOrchestrator((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+        }
         if (!active || events.length === 0) return;
         await refresh(boardKey, projectId);
         if (!active) return;
