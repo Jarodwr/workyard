@@ -299,6 +299,9 @@ export default function App() {
               cues={cues}
               orchestrator={orchestrator}
               onOrchestratorState={(state) => mutate(() => client.setOrchestratorState(board.key, state))}
+              onPlan={() => void mutate(() => client.openPlanner(board.key))}
+              onOpenInTerminal={(card) => mutate(() => client.openInTerminal(card.key))}
+              onReleaseHold={(card) => mutate(() => client.releaseSessionHold(card.key))}
               onOpen={setSelectedId}
               onAnswer={(question, answer, note) => mutate(() => client.answerQuestion(question, answer, note))}
               onAssignStakeholder={(question, stakeholderId) => mutate(() => stakeholderId ? client.assignQuestionStakeholder(question, stakeholderId) : client.unassignQuestionStakeholder(question))}

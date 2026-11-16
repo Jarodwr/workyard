@@ -2041,6 +2041,14 @@ fn annotate_claim_activity(db: &Connection, card: &mut Value) -> Result<()> {
         return Ok(());
     };
     let (owner, id) = (owner.as_str(), id.as_str());
+    // Enough for a board to offer "open this agent in a terminal" without a per-card read.
+    if let Some(session) = sessions::active_session(db, id)? {
+        card["session"] = json!({
+            "runner": session["runner"],
+            "paused": session["paused_at"].is_string(),
+            "held_by": session["held_by"],
+        });
+    }
     let lane_kind: String = db.query_row(
         "SELECT kind FROM lanes WHERE id=?1",
         [card["lane_id"].as_str().unwrap_or_default()],

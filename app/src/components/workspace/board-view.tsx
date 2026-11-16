@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -12,8 +13,9 @@ import {
   GitFork,
   CircleHelp,
 } from "lucide-react";
-import type { Board, Orchestrator, Project, Question } from "@/api";
-import { OrchestratorBar } from "@/components/workspace/orchestrator-bar";
+import type { Board, Card, Orchestrator, Project, Question } from "@/api";
+import { AgentTerminalButton } from "@/components/workspace/agent-terminal-button";
+import { BoardToolbar } from "@/components/workspace/board-toolbar";
 import { DependencyView } from "@/components/workspace/dependency-view";
 import { Badge } from "@/components/ui/badge";
 import { Card as UiCard } from "@/components/ui/card";
@@ -29,6 +31,9 @@ type Props = {
   cues: Record<string, string>;
   orchestrator: Orchestrator | null;
   onOrchestratorState: (state: Orchestrator["desired_state"]) => void;
+  onPlan: () => void;
+  onOpenInTerminal: (card: Card) => Promise<boolean>;
+  onReleaseHold: (card: Card) => Promise<boolean>;
   onOpen: (id: string) => void;
   onAnswer: (question: Question, answer: string, note: string) => Promise<boolean>;
   onAssignStakeholder: (question: Question, stakeholderId: string) => Promise<boolean>;
@@ -54,6 +59,9 @@ export function BoardView({
   cues,
   orchestrator,
   onOrchestratorState,
+  onPlan,
+  onOpenInTerminal,
+  onReleaseHold,
   onOpen,
   onAnswer,
   onAssignStakeholder,
@@ -62,10 +70,46 @@ export function BoardView({
 }: Props) {
   const reduced = useReducedMotion();
   const phase = board.phases.find((item)=>item.id===phaseId) ?? board.phases.find((item)=>item.status==="current") ?? board.phases[0];
+  const [phaseFilter, setPhaseFilter] = useState("all");
+  const [showCompleted, setShowCompleted] = useState(false);
+  const visiblePhases = board.phases.filter((item) => showCompleted || item.status !== "closed");
+  const completedCount = board.phases.filter((item) => item.status === "closed").length;
+  const graphControls = (
+    <>
+      <label className="flex items-center gap-1.5 text-muted-foreground">Phase
+        <select className="rounded border bg-background px-2 py-1 text-foreground" value={phaseFilter} onChange={(event) => setPhaseFilter(event.target.value)}>
+          <option value="all">{showCompleted ? "All phases" : "Active and upcoming"}</option>
+          {visiblePhases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </label>
+      {(showCompleted || completedCount > 0) && (
+        <label className="flex cursor-pointer items-center gap-1.5 text-muted-foreground">
+          <input type="checkbox" checked={showCompleted} onChange={(event) => { setShowCompleted(event.target.checked); setPhaseFilter("all"); }} />
+          Show completed{completedCount > 0 ? ` (${completedCount})` : ""}
+        </label>
+      )}
+    </>
+  );
+  const phaseControls = (
+    <>
+      <button className="flex shrink-0 items-center gap-1.5 font-medium text-muted-foreground hover:text-foreground" onClick={onBackToGraph}><ArrowLeft className="size-3.5" />Phase graph</button>
+      <span className="flex min-w-0 items-center gap-2">
+        <strong className="truncate text-sm" title={phase?.description}>{phase?.name ?? "Phase"}</strong>
+        {phase && <Badge variant="secondary">{phase.status === "closed" ? "Completed" : phase.status === "future" ? "Upcoming" : "Current"}</Badge>}
+      </span>
+    </>
+  );
   return (
     <div className="flex h-full min-h-0 flex-col">
       <h1 className="sr-only">{board.name} — {view}</h1>
-      <OrchestratorBar board={board.key} orchestrator={orchestrator} onState={onOrchestratorState} />
+      <BoardToolbar
+        boardKey={board.key}
+        left={view === "dependencies" ? graphControls : phaseControls}
+        orchestrator={orchestrator}
+        onOrchestratorState={onOrchestratorState}
+        onPlan={onPlan}
+        showLegend={view === "dependencies"}
+      />
       {view === "dependencies" ? (
         <div className="min-h-0 flex-1">
           <DependencyView
@@ -76,15 +120,14 @@ export function BoardView({
             onAnswer={onAnswer}
             onAssignStakeholder={onAssignStakeholder}
             onOpenPhase={onOpenPhase}
+            phaseFilter={phaseFilter}
+            showCompleted={showCompleted}
+            onOpenInTerminal={onOpenInTerminal}
+            onReleaseHold={onReleaseHold}
           />
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-3">
-          <div className="shrink-0 rounded-lg border bg-card px-3 py-2">
-            <button className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground" onClick={onBackToGraph}><ArrowLeft className="size-3.5" />Back to phase graph</button>
-            <div className="mt-1 flex items-center gap-2"><h2 className="text-base font-semibold">{phase?.name ?? "Phase"}</h2>{phase && <Badge variant="secondary">{phase.status === "closed" ? "Completed" : phase.status === "future" ? "Upcoming" : "Current"}</Badge>}</div>
-            {phase?.description && <p className="mt-0.5 text-xs text-muted-foreground">{phase.description}</p>}
-          </div>
           <LayoutGroup id={`board-${board.id}`}>
             <div className="grid min-h-0 flex-1 grid-flow-col auto-cols-[minmax(265px,1fr)] gap-3 overflow-x-auto pb-1">
               {board.lanes.map((lane) => {
@@ -133,6 +176,7 @@ export function BoardView({
                               <h3 className="min-w-0 flex-1 line-clamp-2 text-[13px] font-semibold leading-4">
                                 {card.title}
                               </h3>
+                              <AgentTerminalButton card={card} onOpen={onOpenInTerminal} onRelease={onReleaseHold} className="-my-1 -mr-1 shrink-0" />
                               {card.blocking_impact > 0 && (
                                 <Badge variant="outline" className="shrink-0 gap-0.5 border-violet-500/30 bg-violet-500/10 px-1 py-0 text-[9px] leading-4 text-violet-700 dark:text-violet-300" title={`Holds up ${card.blocking_impact} downstream cards`}>
                                   <GitFork className="size-2.5" /> {card.blocking_impact}

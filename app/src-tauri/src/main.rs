@@ -133,6 +133,49 @@ claude --resume {session}{worktree}\n",
     std::process::Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?;
     Ok(held)
 }
+/// Open a planner agent in the default terminal, pointed at one board. It gets the planner skill
+/// as extra system prompt (so the plugin need not be installed) and acts as its own actor.
+#[tauri::command]
+fn open_planner(board: String) -> Result<Value, String> {
+    const SKILL: &str = include_str!("../../../plugin/skills/workyard-planner/SKILL.md");
+    let store = store()?;
+    let view = store.view_board(&board).map_err(|e| e.to_string())?;
+    let key = view["key"].as_str().unwrap_or(&board).to_owned();
+    let name = view["name"].as_str().unwrap_or_default().to_owned();
+    // Drop the skill's frontmatter; the rest is plain instructions.
+    let instructions = SKILL.splitn(3, "---").nth(2).unwrap_or(SKILL).trim().to_owned();
+    let repo = repository_for_board(&store, view["id"].as_str().unwrap_or_default())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| ".".into());
+    let dir = std::env::temp_dir();
+    let system = dir.join(format!("workyard-plan-{}.md", key.to_lowercase()));
+    std::fs::write(&system, instructions).map_err(|e| e.to_string())?;
+    let first = format!(
+        "I want to plan or change the work on board {key} ({name}). Read it first with `workyard --json board {key}` \
+and its project with `workyard --json projects`, summarise what is there in a few lines, then ask me what to change. \
+Do not claim or start any card."
+    );
+    let script = format!(
+        "#!/bin/zsh\ncd {repo} || exit 1\nexport WORKYARD_DB={db}\nexport WORKYARD_ACTOR={actor}\n\
+echo 'Workyard planner for {key}. Cards are not started from here; run the orchestrator for that.'\n\
+claude --append-system-prompt \"$(cat {system})\" {first}\n",
+        repo = shell_quote(&repo),
+        db = shell_quote(&store.path().to_string_lossy()),
+        actor = shell_quote(&format!("agent:planner-{}", key.to_lowercase())),
+        system = shell_quote(&system.to_string_lossy()),
+        first = shell_quote(&first),
+        key = key,
+    );
+    let path = dir.join(format!("workyard-plan-{}.command", key.to_lowercase()));
+    std::fs::write(&path, script).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    std::process::Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"board": key}))
+}
 #[tauri::command]
 fn release_session_hold(card: String) -> Result<Value, String> {
     wrap(store()?.release_task_session_hold("ui", &card))
@@ -185,6 +228,7 @@ fn main() {
             unassign_question_stakeholder,
             approve_change,
             open_in_terminal,
+            open_planner,
             release_session_hold,
             orchestrator_status,
             set_orchestrator_state

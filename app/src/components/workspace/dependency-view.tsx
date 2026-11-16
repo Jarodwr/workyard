@@ -3,7 +3,8 @@ import {
   ArrowUpRight, Bot, Check, GitFork, Link2,
   LockKeyhole, Minus, Plus, X, CircleHelp,
 } from "lucide-react";
-import { client, type Board, type Dependency, type Project, type Question } from "@/api";
+import { client, type Board, type Card, type Dependency, type Project, type Question } from "@/api";
+import { AgentTerminalButton } from "@/components/workspace/agent-terminal-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard } from "@/components/ui/card";
@@ -16,6 +17,7 @@ import { cn } from "@/lib/utils";
 
 export function DependencyView({
   board, questions, stakeholders, onOpenCard, onOpenPhase, onAnswer, onAssignStakeholder,
+  phaseFilter, showCompleted, onOpenInTerminal, onReleaseHold,
 }: {
   board: Board;
   questions: Question[];
@@ -24,21 +26,23 @@ export function DependencyView({
   onOpenPhase: (id: string) => void;
   onAnswer: (question: Question, answer: string, note: string) => Promise<boolean>;
   onAssignStakeholder: (question: Question, stakeholderId: string) => Promise<boolean>;
+  /** Chosen in the board toolbar. */
+  phaseFilter: string;
+  showCompleted: boolean;
+  onOpenInTerminal: (card: Card) => Promise<boolean>;
+  onReleaseHold: (card: Card) => Promise<boolean>;
 }) {
   const [dependencies, setDependencies] = useState<Dependency[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
-  const [phaseFilter, setPhaseFilter] = useState<string>("all");
-  const [showCompleted, setShowCompleted] = useState(false);
   const [answeringId, setAnsweringId] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [answerNote, setAnswerNote] = useState("");
   const graphScrollRef = useRef<HTMLDivElement>(null);
   const cards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
   const visiblePhases = board.phases.filter((phase) => showCompleted || phase.status !== "closed");
-  const completedCount = board.phases.filter((phase) => phase.status === "closed").length;
 
   useEffect(() => {
     let active = true;
@@ -60,8 +64,11 @@ export function DependencyView({
   }, [cards]);
 
   useEffect(() => setSelectedId(null), [board.id]);
-  useEffect(() => setPhaseFilter("all"), [board.id]);
-  useEffect(() => setShowCompleted(false), [board.id]);
+  // A new phase selection starts from the top with nothing traced.
+  useEffect(() => {
+    setSelectedId(null);
+    graphScrollRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [phaseFilter, showCompleted]);
 
   const { layout, questionOnlyCounts } = useMemo(() => {
     const laneById = new Map(board.lanes.map((lane) => [lane.id, lane]));
@@ -122,26 +129,7 @@ export function DependencyView({
   const answering = answeringId ? questionById.get(answeringId) : undefined;
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2">
-      <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border bg-card px-3 py-2 text-[11px] text-muted-foreground">
-        <span><strong className="text-foreground">{layout.edges.length}</strong> links</span>
-        <span><strong className="text-amber-700 dark:text-amber-300">{layout.openEdges}</strong> waiting</span>
-        <span><strong className="text-violet-700 dark:text-violet-300">{layout.chokepoints}</strong> chokepoints</span>
-        <span>Longest sequence: <strong className="text-foreground">{layout.longestChainLength}</strong> steps</span>
-        <label className="ml-auto flex items-center gap-1.5">Phase
-          <select className="rounded border bg-background px-2 py-1 text-foreground" value={phaseFilter} onChange={(event) => {setPhaseFilter(event.target.value);setSelectedId(null);graphScrollRef.current?.scrollTo({top:0,left:0});}}>
-            <option value="all">{showCompleted ? "All phases" : "Active and upcoming"}</option>
-            {visiblePhases.map((phase) => <option key={phase.id} value={phase.id}>{phase.name}</option>)}
-          </select>
-        </label>
-        {(showCompleted || completedCount > 0) && <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={showCompleted} onChange={(event)=>{setShowCompleted(event.target.checked);setPhaseFilter("all");setSelectedId(null);graphScrollRef.current?.scrollTo({top:0,left:0});}} />Show completed{completedCount > 0 ? ` (${completedCount})` : ""}</label>}
-        <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon" className="size-6" aria-label="Zoom out" disabled={zoom <= 0.7} onClick={() => setZoom((value) => Math.max(0.7, +(value - 0.15).toFixed(2)))}><Minus className="size-3" /></Button>
-          <span className="w-8 text-center font-mono text-[10px]">{Math.round(zoom * 100)}%</span>
-          <Button variant="ghost" size="icon" className="size-6" aria-label="Zoom in" disabled={zoom >= 1.3} onClick={() => setZoom((value) => Math.min(1.3, +(value + 0.15).toFixed(2)))}><Plus className="size-3" /></Button>
-        </div>
-      </div>
-
+    <div className="relative flex h-full min-h-0 flex-col">
       <div ref={graphScrollRef} className="min-h-0 flex-1 overflow-auto rounded-xl border bg-muted/20">
         {loading ? (
           <div className="flex h-full min-h-52 items-center justify-center text-sm text-muted-foreground">Loading dependency graph…</div>
@@ -229,6 +217,7 @@ export function DependencyView({
                       <span className="mt-auto w-full truncate pr-5 text-[10px] text-muted-foreground">{node.cancelled ? `Cancelled: ${card?.cancellation_reason ?? ""}` : card ? node.detail : questionOnlyCount > 0 ? `Only questions block ${questionOnlyCount} task${questionOnlyCount === 1 ? "" : "s"}` : question?.recommended_option ? `Suggests: ${question.recommended_option}` : node.resolved ? "Resolved" : "Open"}</span>
                     </button>
                     {question && <div className="absolute right-1.5 top-1.5"><StakeholderPicker question={question} stakeholders={stakeholders} compact onAssign={(stakeholderId)=>onAssignStakeholder(question,stakeholderId)} /></div>}
+                    {card && <AgentTerminalButton card={card} onOpen={onOpenInTerminal} onRelease={onReleaseHold} className="absolute bottom-1.5 right-7" />}
                     <button className="absolute bottom-1.5 right-1.5 rounded p-1 text-muted-foreground hover:bg-accent hover:text-primary" aria-label={card ? `Open ${node.key} details` : `Answer ${node.key} question`} onClick={() => card ? onOpenCard(card.id) : (setAnsweringId(node.id), setAnswer(""), setAnswerNote(""))}><ArrowUpRight className="size-3.5" /></button>
                   </div>
                 );
@@ -237,18 +226,17 @@ export function DependencyView({
           </div>
         )}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 rounded-lg border bg-card px-3 py-2 text-[11px] text-muted-foreground" aria-label="Dependency graph legend">
-        <span className="font-medium text-foreground">Prerequisite → dependent</span>
-        <span className="flex items-center gap-1.5"><span className="h-0.5 w-5 bg-primary" /> Longest sequence</span>
-        <span className="flex items-center gap-1.5"><span className="w-5 border-t-2 border-dashed border-amber-500" /> Open dependency</span>
-        <span className="flex items-center gap-1.5"><span className="h-0.5 w-5 bg-slate-400" /> Resolved</span>
-        <span className="flex items-center gap-1.5"><span className="w-5 border-t-2 border-dotted border-indigo-500" /> Must finish first</span>
-        <span className="flex items-center gap-1.5"><span className="size-3 rounded-sm border-2 border-red-500" /> Only questions remain</span>
+      <div className="pointer-events-none absolute inset-x-4 bottom-4 z-30 flex items-end justify-between gap-3">
         {selected ? (
-          <button className="ml-auto flex items-center gap-1 font-medium text-foreground hover:text-primary" onClick={() => setSelectedId(null)}>
+          <button className="pointer-events-auto flex items-center gap-1.5 rounded-md border bg-card/95 px-2.5 py-1.5 text-[11px] font-medium shadow-sm hover:text-primary" onClick={() => setSelectedId(null)}>
             {selected.key}: {trace?.upstream.size} upstream · {trace?.downstream.size} downstream <X className="size-3" />
           </button>
-        ) : <span className="ml-auto">Select a node to trace its chain</span>}
+        ) : <span />}
+        <div className="pointer-events-auto flex items-center gap-0.5 rounded-md border bg-card/95 p-0.5 shadow-sm">
+          <Button variant="ghost" size="icon" className="size-6" aria-label="Zoom out" disabled={zoom <= 0.7} onClick={() => setZoom((value) => Math.max(0.7, +(value - 0.15).toFixed(2)))}><Minus className="size-3" /></Button>
+          <span className="w-9 text-center font-mono text-[10px]">{Math.round(zoom * 100)}%</span>
+          <Button variant="ghost" size="icon" className="size-6" aria-label="Zoom in" disabled={zoom >= 1.3} onClick={() => setZoom((value) => Math.min(1.3, +(value + 0.15).toFixed(2)))}><Plus className="size-3" /></Button>
+        </div>
       </div>
       {answering && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={(event)=>{if(event.target===event.currentTarget)setAnsweringId(null);}}>
         <div role="dialog" aria-modal="true" aria-label={`Answer ${answering.title}`} className="w-full max-w-lg rounded-xl border bg-background p-5 shadow-xl">
