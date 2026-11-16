@@ -1718,3 +1718,49 @@ fn committed_writes_publish_the_latest_event_id_to_the_tick_file() {
     // Nothing changed since: waiting times out with the same marker.
     assert_eq!(store.wait_for_tick(&next, std::time::Duration::from_millis(60)), next);
 }
+
+#[test]
+fn silent_owner_of_active_work_is_stale_unless_paused_or_orchestrated() {
+    let (_dir, store, board) = setup();
+    let card = store.create_card("cli", &board, "Work", "", "P2", None).unwrap();
+    let key = card["key"].as_str().unwrap();
+    store.claim_card("agent:a", key, 1).unwrap();
+    store.move_card("agent:a", key, "In Progress", None, None::<i64>).unwrap();
+    let id = store.view_card(key).unwrap()["id"].as_str().unwrap().to_owned();
+    assert_eq!(store.view_card(key).unwrap()["stale"], false, "just written");
+
+    let backdate = |when: &str| {
+        let db = store.open().unwrap();
+        db.execute("UPDATE cards SET updated_at=?2 WHERE id=?1", [&id, when]).unwrap();
+        db.execute("UPDATE events SET ts=?2 WHERE entity_id=?1", [&id, when]).unwrap();
+    };
+    backdate("2000-01-01T00:00:00+00:00");
+    let stale = store.view_card(key).unwrap();
+    assert_eq!(stale["stale"], true);
+    assert_eq!(stale["last_activity_at"], "2000-01-01T00:00:00+00:00");
+    let on_board = store.view_board(&board).unwrap();
+    let listed = on_board["lanes"][1]["cards"][0].clone();
+    assert_eq!(listed["stale"], true, "board view carries the flag too");
+
+    // Other actors' writes are not the owner's activity.
+    store.add_card_note("human", key, "ping").unwrap();
+    assert_eq!(store.view_card(key).unwrap()["stale"], true);
+
+    // A paused session is waiting by design.
+    store.attach_task_session("agent:a", key, "claude", "sess").unwrap();
+    store.pause_task_session("agent:a", key, None).unwrap();
+    assert_eq!(store.view_card(key).unwrap()["stale"], false);
+    store.resume_task_session("agent:a", key).unwrap();
+    assert_eq!(store.view_card(key).unwrap()["stale"], true);
+
+    // A connected orchestrator tracks its own workers, so silence alone proves nothing.
+    store.orchestrator_acquire(&board, "run", "h", None, 30, None).unwrap();
+    assert_eq!(store.view_card(key).unwrap()["stale"], false);
+
+    // Owner activity clears the flag; the stored event history never contains it.
+    store.orchestrator_release(&format!("orch:{board}#1"), &board).unwrap();
+    store.update_progress("agent:a", key, 10, None, None::<i64>).unwrap();
+    assert_eq!(store.view_card(key).unwrap()["stale"], false);
+    let events = store.poll_events(0, 1000).unwrap().to_string();
+    assert!(!events.contains("\"stale\""));
+}

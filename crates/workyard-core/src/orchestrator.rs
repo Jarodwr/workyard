@@ -124,6 +124,11 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
     Ok(row)
 }
 
+/// True while a live orchestrator holds the board's lease.
+pub(crate) fn board_orchestrator_connected(db: &Connection, board_id: &str) -> Result<bool> {
+    Ok(session_row(db, board_id)?["connected"] == true)
+}
+
 fn active_workers(db: &Connection, board_id: &str) -> Result<i64> {
     Ok(db.query_row(
         "SELECT COUNT(*) FROM task_sessions s JOIN cards c ON c.id=s.card_id WHERE c.board_id=?1 AND s.detached_at IS NULL AND s.paused_at IS NULL",

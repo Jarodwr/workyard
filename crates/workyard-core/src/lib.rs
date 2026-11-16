@@ -389,7 +389,9 @@ impl Store {
             let mut card_stmt =
                 db.prepare("SELECT id FROM cards WHERE lane_id=?1 ORDER BY position,id")?;
             for card in card_stmt.query_map([&lane_id], |r| r.get::<_, String>(0))? {
-                cards.push(card_row(&db, &card?)?);
+                let mut row = card_row(&db, &card?)?;
+                annotate_claim_activity(&db, &mut row)?;
+                cards.push(row);
             }
             lanes.push(json!({"id":lane_id,"name":name,"kind":kind,"position":position,"archived":archived!=0,"version":version,"cards":cards}));
         }
@@ -447,6 +449,7 @@ impl Store {
         let db = self.open()?;
         let card_id = resolve_card(&db, card)?;
         let mut output = card_row(&db, &card_id)?;
+        annotate_claim_activity(&db, &mut output)?;
         let mut deps = Vec::new();
         let mut stmt = db.prepare("SELECT id,from_card_id,to_card_id,to_question_id,scope FROM dependencies WHERE from_card_id=?1 OR to_card_id=?1 ORDER BY created_at,id")?;
         for row in stmt.query_map([&card_id], |r| {
@@ -1962,6 +1965,58 @@ fn card_snapshot(db: &Connection, id: &str) -> Result<Card> {
         open_question_count,
         blocking_impact: blocking_impact(db, &id)?,
     })
+}
+/// Minutes of owner silence after which a claim on active work is flagged `stale`.
+fn stale_after_minutes() -> i64 {
+    std::env::var("WORKYARD_STALE_MINUTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|m| *m > 0)
+        .unwrap_or(15)
+}
+
+/// Add `last_activity_at` and `stale` to a card read. Derived on read and never stored, so
+/// event history does not capture a value that depends on the clock. A claim is stale when
+/// the card is In Progress, its owner has written nothing for the threshold, and nothing
+/// accounts for the silence: a paused session is waiting by design, and a connected
+/// orchestrator watches its own workers and pauses the session of any that die.
+fn annotate_claim_activity(db: &Connection, card: &mut Value) -> Result<()> {
+    card["stale"] = json!(false);
+    let (Some(owner), Some(id)) = (
+        card["owner_actor"].as_str().map(str::to_owned),
+        card["id"].as_str().map(str::to_owned),
+    ) else {
+        return Ok(());
+    };
+    let (owner, id) = (owner.as_str(), id.as_str());
+    let lane_kind: String = db.query_row(
+        "SELECT kind FROM lanes WHERE id=?1",
+        [card["lane_id"].as_str().unwrap_or_default()],
+        |r| r.get(0),
+    )?;
+    if lane_kind != "active" || card["cancelled_at"].is_string() {
+        return Ok(());
+    }
+    let last_event: Option<String> = db.query_row(
+        "SELECT MAX(ts) FROM events WHERE entity_id=?1 AND actor=?2",
+        params![id, owner],
+        |r| r.get(0),
+    )?;
+    let updated = card["updated_at"].as_str().unwrap_or_default().to_owned();
+    let last = last_event.filter(|ts| *ts > updated).unwrap_or(updated);
+    card["last_activity_at"] = json!(last);
+    if let Some(session) = sessions::active_session(db, id)? {
+        if session["paused_at"].is_string()
+            || orchestrator::board_orchestrator_connected(db, card["board_id"].as_str().unwrap_or_default())?
+        {
+            return Ok(());
+        }
+    }
+    if let Ok(last) = chrono::DateTime::parse_from_rfc3339(&last) {
+        let silent = Utc::now().signed_duration_since(last);
+        card["stale"] = json!(silent > chrono::Duration::minutes(stale_after_minutes()));
+    }
+    Ok(())
 }
 fn blocking_impact(db: &Connection, id: &str) -> Result<i64> {
     Ok(db.query_row(
