@@ -7,7 +7,7 @@
       "name": "workyard",
       "source": "./plugin",
       "description": "Work on Workyard board cards through the local workyard CLI.",
-      "version": "0.1.0"
+      "version": "0.1.1"
     }
   ]
 }
