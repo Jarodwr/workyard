@@ -44,6 +44,12 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 | Take work away from a worker | Force-release the card (`workyard orch force-release C-3 --reason "..." --expected-version N`), which stops its worker; then replan or cancel it. Only a card's owner can cancel it. |
 | See what a worker is doing | `<db>.logs/<card>-<session>.log` holds its stream-json output. |
 
+## Questions and side discoveries
+
+Workers are told to ask, not guess. When a card leaves a real choice open (scope, user-visible behaviour or naming, a trade-off, anything the card's author would want to weigh in on) the worker raises a question with 2-4 options, a recommendation and a one-line reason, then pauses until you answer. Expect many questions; answer them in the phase graph or the stakeholder view. Workers do not ask about mechanical blockers (a refused command, a merge conflict, a failing test); they fix those.
+
+When a worker finds a bug, missing piece or follow-up outside its card, it adds a Backlog card (`task add-card`, with what, where and why), orders it with `task depend` if needed, and links it from its own card's note. It adds at most 3 per card and never starts them, so review the Backlog after a run.
+
 ## What it does by itself
 
 - **Retries.** A worker that exits unfinished is resumed; after three failures its session is detached with a note and the card goes back to the backlog for a fresh worker (up to twice); after that you are notified. A card cannot reach Done until its branch is on the target branch.
