@@ -338,3 +338,43 @@ fn cli_permission_requests_are_listed_and_only_a_human_may_decide_them() {
     assert!(!ok && missing["error"]["code"] == "not_found", "{missing}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn cli_status_and_wait_report_why_and_time_out() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("workyard-status-cli-{nonce}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("board.db");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_workyard")).args(["--db", db.to_str().unwrap(), "--actor", "agent:one"]).args(args).output().unwrap()
+    };
+    let json = |args: &[&str]| -> Value {
+        let mut all = vec!["--json"];
+        all.extend_from_slice(args);
+        let out = run(&all);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["data"].clone()
+    };
+    let board = json(&["plan", "create-board", "Watch"]);
+    let key = board["key"].as_str().unwrap();
+    json(&["task", "add-card", key, "First task", "--agent-type", "Engineering"]);
+
+    let status = json(&["status", key]);
+    assert_eq!(status["attention"].as_array().unwrap().len(), 0);
+    assert!(status["lanes"].as_array().unwrap().iter().any(|l| l["cards"].as_array().unwrap().len() == 1));
+    let text = String::from_utf8(run(&["status", key]).stdout).unwrap();
+    assert!(text.contains("First task") && text.contains("Nothing needs attention"), "{text}");
+
+    // Nothing is happening, so a short wait times out with a distinct non-zero code.
+    let out = run(&["wait", key, "--until", "done", "--timeout", "1s"]);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(run(&["wait", key, "--until", "soon"]).status.code() != Some(0));
+
+    json(&["task", "ask", key, "Which renderer?", "--kind", "engineering", "--option", "Canvas", "--option", "SVG", "--recommend", "SVG", "--why", "Clear text"]);
+    let out = run(&["wait", key, "--until", "attention", "--timeout", "5s"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("open question"), "{}", String::from_utf8_lossy(&out.stdout));
+    let text = String::from_utf8(run(&["status", key]).stdout).unwrap();
+    assert!(text.contains("Needs attention"), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}

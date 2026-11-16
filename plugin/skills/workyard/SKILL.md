@@ -25,4 +25,4 @@ Workyard is a local kanban shared with humans. Use the `workyard` CLI with `--js
 - If a command fails with `version_conflict`, reread the card and retry. On `ownership_conflict`, stop; someone else owns it.
 - Side discoveries: when you find a bug, missing piece or follow-up outside your card, never fix it silently or ignore it. Add a Backlog card: `task add-card <board> "Title" --desc "what, where, why"`, order it with `task depend` if needed, and add one line to your own card's note linking it (`task note C-12 "found C-N: ..."`). At most 3 new cards per card, and never start them.
 - Only the planner role uses `plan`; the only `orch` command you use is `orch session pause`; `admin` is for humans.
-- Reads: `boards`, `board <B-1>`, `card <C-1>`, `questions`, `history`.
+- Reads: `boards`, `board <B-1>`, `card <C-1>`, `questions`, `history`; `status <B-1>` is a one-screen summary, and `wait <B-1> --until attention|done|<n>-done [--timeout 30m]` blocks, prints why and exits 0 (4 on timeout).
