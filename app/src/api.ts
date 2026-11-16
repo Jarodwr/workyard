@@ -84,6 +84,7 @@ export const api = {
   viewBoard: (board: string) => invoke<Board>("view_board", { board }),
   viewCard: (card: string) => invoke<CardDetail>("view_card", { card }),
   addCardNote: (card: string, body: string) => invoke<CardNote>("add_card_note", { card, body }),
+  dbPath: () => invoke<string>("db_path"),
   latestEventId: () => invoke<number>("latest_event_id"),
   pollEvents: (since: number, limit = 100) => invoke<EventPage>("poll_events", { since, limit }),
   listQuestions: () => invoke<Question[]>("list_questions"),
@@ -219,6 +220,7 @@ const demoApi = {
   transferCard: async (card: Card, toActor: string): Promise<Card> => { const c = demoFindCard(card.id); c.owner_actor = toActor; c.version++; demoEvent("card_transferred", c.id); return clone(c); },
   forceReleaseCard: async (card: Card, _reason: string): Promise<Card> => { const c = demoFindCard(card.id); c.owner_actor = null; c.version++; demoEvent("card_force_released", c.id); return clone(c); },
   updateProgress: async (card: Card, progress: number, note: string): Promise<Card> => { const c = demoFindCard(card.id); c.progress = progress; c.status_note = note; c.version++; demoEvent("progress_updated", c.id); return clone(c); },
+  dbPath: async (): Promise<string> => "demo",
   latestEventId: async (): Promise<number> => demoEvents.length,
   pollEvents: async (since: number, limit = 100): Promise<EventPage> => {
     const events = demoEvents.filter((e) => e.id > since);
