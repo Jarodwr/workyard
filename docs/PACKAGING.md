@@ -51,6 +51,20 @@ fn bundled_plugin(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
 
 Fall back to `workyard` on `PATH` and `plugin/` in a checkout in dev. Export `WORKYARD_BIN=<dir of the CLI>` to spawned terminals/workers so the plugin hook finds it. Optionally add `bundled_cli()`'s directory to the user's PATH via "Install CLI" (symlink to `/usr/local/bin/workyard`).
 
+## Release build verification (2026-11-16, aarch64, unsigned)
+
+`yarn install` then `npx tauri build` (from `app/`, with `beforeBuildCommand` staging the release CLI) produced `Workyard.app` and `Workyard_0.1.0_aarch64.dmg` under `$CARGO_TARGET_DIR/release/bundle/` (`target/` by default) with no config changes needed. Checked:
+
+- The `.app` has `Contents/MacOS/workyard`, `Contents/MacOS/workyard-desktop`, `Contents/Resources/marketplace/plugin` and `marketplace/.claude-plugin/marketplace.json`.
+- The dmg mounts (`hdiutil attach -nobrowse -readonly -mountpoint <dir> <dmg>`) and holds `Workyard.app` and an `Applications` link.
+- `claude plugin validate` passes on `…/Resources/marketplace/plugin` and on `…/Resources/marketplace`.
+- `Contents/MacOS/workyard-desktop` starts and stays running (checked with `WORKYARD_DB=<tmp>/t.db` so it does not touch the real database; it created the database).
+- `workyard` has no `--version` flag; use `workyard --help` to smoke-test the bundled CLI.
+
+The build is only ad-hoc signed (`codesign -dv` shows `Signature=adhoc`, no TeamIdentifier), so Gatekeeper rejects it when downloaded.
+
+Still needed for a distributable build: an Apple Developer ID Application certificate, then the `APPLE_*` variables below set during `tauri build` (signing plus notarization and stapling). Nothing in the repo needs to change for that; only the environment.
+
 ## Signing and notarization (document only, not run)
 
 Tauri signs and notarizes during `tauri build` when these are set:
