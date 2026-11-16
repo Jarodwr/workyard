@@ -2076,6 +2076,12 @@ fn card_snapshot(db: &Connection, id: &str) -> Result<Card> {
     )?;
     let finish_blockers = blockers(db, &id, "finish")?;
     let blockers = blockers(db, &id, "start")?;
+    let mut cancelled_prerequisites = card_prerequisites(db, &id, "start", true)?;
+    for extra in card_prerequisites(db, &id, "finish", true)? {
+        if !cancelled_prerequisites.iter().any(|b| b.id == extra.id) {
+            cancelled_prerequisites.push(extra);
+        }
+    }
     let mut review_gates = Vec::new();
     let mut stmt = db.prepare("SELECT id,working_branch,commit_oid,approved_commit_oid,reviewer FROM card_changes WHERE card_id=?1 AND review_required=1 ORDER BY created_at,id")?;
     for row in stmt.query_map([&id], |r| {
@@ -2142,6 +2148,7 @@ fn card_snapshot(db: &Connection, id: &str) -> Result<Card> {
         blocked,
         blockers,
         finish_blockers,
+        cancelled_prerequisites,
         review_gates,
         can_finish,
         ready: !blocked && lane_kind != LaneKind::Done && cancelled_at.is_none(),
@@ -2241,21 +2248,33 @@ fn blocking_impact(db: &Connection, id: &str) -> Result<i64> {
             SELECT d.from_card_id FROM dependencies d
             JOIN cards source ON source.id=d.to_card_id
             JOIN lanes source_lane ON source_lane.id=source.lane_id
-            WHERE d.to_card_id=?1 AND source_lane.kind!='done'
+            WHERE d.to_card_id=?1 AND source_lane.kind!='done' AND source.cancelled_at IS NULL
             UNION
             SELECT d.from_card_id FROM dependencies d JOIN held h ON d.to_card_id=h.id
             JOIN cards source ON source.id=h.id
             JOIN lanes source_lane ON source_lane.id=source.lane_id
-            WHERE source_lane.kind!='done'
+            WHERE source_lane.kind!='done' AND source.cancelled_at IS NULL
         ) SELECT COUNT(*) FROM held",
         [id],
         |r| r.get(0),
     )?)
 }
+/// Live blockers of a card in `scope`. A cancelled prerequisite will never finish, so it does
+/// not block; it is listed by `cancelled_prerequisites` instead.
 fn blockers(db: &Connection, card_id: &str, scope: &str) -> Result<Vec<Blocker>> {
+    let mut result = card_prerequisites(db, card_id, scope, false)?;
+    result.extend(question_blockers(db, card_id, scope)?);
+    Ok(result)
+}
+fn card_prerequisites(
+    db: &Connection,
+    card_id: &str,
+    scope: &str,
+    cancelled: bool,
+) -> Result<Vec<Blocker>> {
     let mut result = Vec::new();
-    let mut stmt = db.prepare("SELECT c.id,c.key,c.title,c.cancelled_at IS NOT NULL FROM dependencies d JOIN cards c ON c.id=d.to_card_id JOIN lanes l ON l.id=c.lane_id WHERE d.from_card_id=?1 AND d.scope=?2 AND l.kind!='done' ORDER BY c.key")?;
-    for row in stmt.query_map(params![card_id, scope], |r| {
+    let mut stmt = db.prepare("SELECT c.id,c.key,c.title,c.cancelled_at IS NOT NULL FROM dependencies d JOIN cards c ON c.id=d.to_card_id JOIN lanes l ON l.id=c.lane_id WHERE d.from_card_id=?1 AND d.scope=?2 AND l.kind!='done' AND (c.cancelled_at IS NOT NULL)=?3 ORDER BY c.key")?;
+    for row in stmt.query_map(params![card_id, scope, cancelled], |r| {
         Ok(Blocker {
             kind: BlockerKind::Card,
             id: r.get(0)?,
@@ -2266,6 +2285,10 @@ fn blockers(db: &Connection, card_id: &str, scope: &str) -> Result<Vec<Blocker>>
     })? {
         result.push(row?);
     }
+    Ok(result)
+}
+fn question_blockers(db: &Connection, card_id: &str, scope: &str) -> Result<Vec<Blocker>> {
+    let mut result = Vec::new();
     let mut stmt = db.prepare("SELECT q.id,q.key,q.title FROM dependencies d JOIN questions q ON q.id=d.to_question_id WHERE d.from_card_id=?1 AND d.scope=?2 AND q.status='open' ORDER BY q.key")?;
     for row in stmt.query_map(params![card_id, scope], |r| {
         Ok(Blocker {

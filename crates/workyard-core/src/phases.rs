@@ -146,9 +146,8 @@ pub(crate) fn current_queue_has_work(db: &Connection, board_id: &str) -> Result<
 fn ensure_phase_complete(db: &Connection, phase_id: &str) -> Result<()> {
     let unfinished:i64=db.query_row("SELECT COUNT(*) FROM cards c JOIN lanes l ON l.id=c.lane_id WHERE c.phase_id=?1 AND c.cancelled_at IS NULL AND l.kind!='done'",[phase_id],|r|r.get(0))?;
     let questions:i64=db.query_row("SELECT COUNT(*) FROM questions WHERE phase_id=?1 AND status='open'",[phase_id],|r|r.get(0))?;
-    let broken:i64=db.query_row("SELECT COUNT(*) FROM dependencies d JOIN cards prerequisite ON prerequisite.id=d.to_card_id JOIN cards dependent ON dependent.id=d.from_card_id WHERE prerequisite.phase_id=?1 AND prerequisite.cancelled_at IS NOT NULL AND dependent.cancelled_at IS NULL",[phase_id],|r|r.get(0))?;
-    if unfinished > 0 || questions > 0 || broken > 0 {
-        return Err(Error::new("phase_incomplete","finish or cancel current work, resolve its questions, and repair cancelled prerequisites before completing the phase").details(json!({"unfinished_cards":unfinished,"open_questions":questions,"cancelled_prerequisites":broken})));
+    if unfinished > 0 || questions > 0 {
+        return Err(Error::new("phase_incomplete","finish or cancel current work and resolve its questions before completing the phase").details(json!({"unfinished_cards":unfinished,"open_questions":questions})));
     }
     Ok(())
 }

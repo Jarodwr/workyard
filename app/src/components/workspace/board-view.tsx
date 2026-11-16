@@ -248,7 +248,7 @@ export function BoardView({
                                 {card.blocked && (
                                   <span className="flex min-w-0 items-center gap-1 truncate text-amber-700 dark:text-amber-300">
                                     <LockKeyhole className="size-3 shrink-0" />
-                                    {card.blockers[0]?.cancelled ? "Prerequisite cancelled" : "Blocked"}{card.blockers[0] ? `: ${card.blockers[0].title}` : ""}
+                                    Blocked{card.blockers[0] ? `: ${card.blockers[0].title}` : ""}
                                   </span>
                                 )}
                                 {!card.can_finish && !card.blocked && (

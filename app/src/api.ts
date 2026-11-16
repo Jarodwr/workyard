@@ -40,6 +40,7 @@ export type Card = {
   ready: boolean;
   blockers: Blocker[];
   finish_blockers?: Blocker[];
+  cancelled_prerequisites?: Blocker[];
   review_gates?: { change_id: string; working_branch: string; commit_oid: string; approved: boolean; reviewer: string | null }[];
   can_finish?: boolean;
   open_question_count: number;

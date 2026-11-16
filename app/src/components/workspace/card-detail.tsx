@@ -210,11 +210,19 @@ export function CardDetail({
                         <span className="font-mono text-muted-foreground">
                           {blocker.key}
                         </span>{" "}
-                        · {blocker.title}{blocker.cancelled ? " (cancelled; replan this dependency)" : ""}
+                        · {blocker.title}
                       </p>
                     ))}
                   </div>
                 </UiCard>
+              )}
+              {!!card.cancelled_prerequisites?.length && (
+                <section className="mt-3">
+                  <p className="text-xs font-semibold text-muted-foreground">Cancelled prerequisites (no longer blocking)</p>
+                  {card.cancelled_prerequisites.map((blocker) => (
+                    <p key={blocker.id} className="mt-1 text-xs text-muted-foreground line-through">{blocker.key} · {blocker.title}</p>
+                  ))}
+                </section>
               )}
               {!card.can_finish && (!!card.finish_blockers?.length || card.review_gates?.some((gate) => !gate.approved)) && (
                 <UiCard className="mt-3 border-indigo-500/25 bg-indigo-500/5 p-3 shadow-none">
