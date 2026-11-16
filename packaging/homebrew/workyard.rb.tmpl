@@ -12,12 +12,15 @@ class Workyard < Formula
     system "cargo", "install", *std_cargo_args(path: "crates/workyard-cli")
     # The CLI finds its Claude plugin at <prefix>/share/workyard/plugin (`pkgshare`)
     pkgshare.install "plugin"
+    # `claude plugin marketplace add` needs a marketplace.json beside the plugin, so install that layout too
+    (pkgshare/"marketplace").install ".claude-plugin"
+    cp_r pkgshare/"plugin", pkgshare/"marketplace"
   end
 
   def caveats
     <<~EOS
       Workyard ships a Claude Code plugin. To use it with Claude Code, run:
-        claude plugin marketplace add #{opt_share}/workyard/plugin
+        claude plugin marketplace add #{opt_pkgshare}/marketplace
         claude plugin install workyard@workyard
 
       Then check that everything is in place:
@@ -27,6 +30,8 @@ class Workyard < Formula
 
   test do
     assert_match "workyard #{version}", shell_output("#{bin}/workyard --version")
+    assert_path_exists pkgshare/"marketplace/.claude-plugin/marketplace.json"
+    assert_path_exists pkgshare/"marketplace/plugin/.claude-plugin/plugin.json"
 
     # `doctor` fails when `claude` or `git` is missing from PATH, as in the
     # test sandbox; stub both so the report is deterministic.
