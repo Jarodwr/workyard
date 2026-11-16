@@ -126,6 +126,12 @@ enum TaskCommand {
         card: String,
         body: String,
     },
+    #[command(about = "Store a markdown report on the card, replacing the previous one (max 256 KB)")]
+    Report {
+        card: String,
+        #[arg(long, help = "Read the report from this file; without it, from stdin")]
+        file: Option<PathBuf>,
+    },
     Update {
         card: String,
         #[arg(long, help = "Required unless you own the card")]
@@ -677,6 +683,20 @@ fn run_task(store: &Store, actor: &str, command: TaskCommand) -> workyard_core::
             expected_version,
         } => store.update_progress(actor, &card, progress, note.as_deref(), expected_version)?,
         TaskCommand::Note { card, body } => store.add_card_note(actor, &card, &body)?,
+        TaskCommand::Report { card, file } => {
+            let body = match file {
+                Some(path) => std::fs::read_to_string(&path).map_err(|e| {
+                    Error::new("validation_error", format!("cannot read {}: {e}", path.display()))
+                })?,
+                None => {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                        .map_err(|e| Error::new("validation_error", format!("cannot read stdin: {e}")))?;
+                    text
+                }
+            };
+            store.set_card_report(actor, &card, &body)?
+        }
         TaskCommand::Update {
             card,
             expected_version,
