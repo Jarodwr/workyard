@@ -300,6 +300,162 @@ claude --append-system-prompt \"$(cat {system})\" {first}\n",
     std::process::Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"board": key}))
 }
+/// What the new-project dialog needs to know about a folder: that it is a git repository, its
+/// current branch (the default target) and whether the working tree is dirty.
+fn git_repository_info(path: &str) -> Result<Value, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("Choose the repository folder.".into());
+    }
+    if !std::path::Path::new(path).is_dir() {
+        return Err(format!("{path} is not a folder."));
+    }
+    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(path).args(args).output();
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).map_err(|e| format!("could not run git: {e}"))?;
+    if !branch.status.success() {
+        let why = String::from_utf8_lossy(&branch.stderr);
+        return Err(if why.contains("not a git repository") {
+            format!("{path} is not a git repository.")
+        } else {
+            format!("{path} has no commits yet; make a first commit so workers have a branch to merge into.")
+        });
+    }
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_owned();
+    if branch == "HEAD" {
+        return Err("The repository is on a detached HEAD; check out a branch first.".into());
+    }
+    let root = git(&["rev-parse", "--show-toplevel"])
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .unwrap_or_else(|| path.to_owned());
+    let dirty = git(&["status", "--porcelain"]).map(|out| !out.stdout.is_empty()).unwrap_or(false);
+    Ok(serde_json::json!({"path": root, "branch": branch, "dirty": dirty}))
+}
+
+#[tauri::command]
+fn inspect_repository(path: String) -> Result<Value, String> {
+    git_repository_info(&path)
+}
+
+/// A native folder picker without a new dependency: AppleScript on macOS. None when cancelled.
+#[tauri::command]
+fn pick_folder() -> Result<Option<String>, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("A folder picker is not available here; type the path.".into());
+    }
+    let out = std::process::Command::new("osascript")
+        .args(["-e", "POSIX path of (choose folder with prompt \"Choose the repository folder\")"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Ok(None); // cancelled
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().trim_end_matches('/').to_owned();
+    Ok((!path.is_empty()).then_some(path))
+}
+
+/// Create a project and its repository as one step; the project is removed again if the
+/// repository cannot be added.
+#[tauri::command]
+fn create_project_from_repository(name: String, description: String, path: String, target_branch: String) -> Result<Value, String> {
+    let info = git_repository_info(&path)?;
+    let root = info["path"].as_str().unwrap_or(&path).to_owned();
+    let store = store()?;
+    let project = store.create_project("ui", &name, &description).map_err(|e| e.to_string())?;
+    let id = project["id"].as_str().unwrap_or_default().to_owned();
+    if let Err(error) = store.add_project_repository("ui", &id, &root, &target_branch, None) {
+        let _ = store.open().and_then(|db| db.execute("DELETE FROM projects WHERE id=?1", [id.as_str()]).map_err(Into::into));
+        return Err(format!("could not add the repository, the project was not created: {error}"));
+    }
+    wrap(store.view_project(&id))
+}
+
+/// `agent:planner-<slug>` needs a name made of lowercase letters, digits and dashes.
+fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_end_matches('-').to_owned();
+    if out.is_empty() { "project".into() } else { out }
+}
+
+/// The planner's opening message for a project: where it is, what boards it has, what to do.
+fn project_planner_message(name: &str, id: &str, repo: &str, branch: &str, boards: &[(String, String)]) -> String {
+    let mut text = format!(
+        "I want to plan work for the Workyard project \"{name}\" (id {id}). Its repository is {repo} and the target branch is {branch}.\n"
+    );
+    if boards.is_empty() {
+        text.push_str(&format!(
+            "The project has no board yet. Ask me what I want built. Then create a board with `workyard plan create-board`, \
+attach it with `workyard plan attach-board <board> {id}`, and add phases, cards and dependencies as the planner skill describes.\n"
+        ));
+    } else {
+        text.push_str("The project has these boards:\n");
+        for (key, board) in boards {
+            text.push_str(&format!("- {key}: {board}\n"));
+        }
+        text.push_str(&format!(
+            "Ask me whether to extend one of them or create another (`workyard plan create-board`, then `workyard plan attach-board <board> {id}`).\n"
+        ));
+    }
+    text.push_str("Do not claim or start any card.");
+    text
+}
+
+/// Open a planner agent in the default terminal for a whole project, started in its repository.
+#[tauri::command]
+fn open_project_planner(project: String) -> Result<Value, String> {
+    const SKILL: &str = include_str!("../../../plugin/skills/workyard-planner/SKILL.md");
+    let store = store()?;
+    let view = store.view_project(&project).map_err(|e| e.to_string())?;
+    let name = view["name"].as_str().unwrap_or_default().to_owned();
+    let id = view["id"].as_str().unwrap_or(&project).to_owned();
+    let repo = view["repositories"][0]["path"].as_str().ok_or("this project has no repository")?.to_owned();
+    let branch = view["repositories"][0]["target_branch"].as_str().unwrap_or("main").to_owned();
+    let boards: Vec<(String, String)> = view["boards"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter(|board| board["archived"] != true)
+                .map(|board| (board["key"].as_str().unwrap_or_default().to_owned(), board["name"].as_str().unwrap_or_default().to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let instructions = SKILL.splitn(3, "---").nth(2).unwrap_or(SKILL).trim().to_owned();
+    let tag = slug(&name);
+    let dir = std::env::temp_dir();
+    let system = dir.join(format!("workyard-plan-project-{tag}.md"));
+    std::fs::write(&system, instructions).map_err(|e| e.to_string())?;
+    let first = project_planner_message(&name, &id, &repo, &branch, &boards);
+    let script = format!(
+        "#!/bin/zsh\ncd {repo} || exit 1\nexport WORKYARD_DB={db}\nexport WORKYARD_ACTOR={actor}\n{bin}\
+echo 'Workyard planner for {title}. Cards are not started from here; run the orchestrator for that.'\n\
+claude --append-system-prompt \"$(cat {system})\" {first}\n",
+        bin = bin_export_line(std::env::current_exe().ok().as_deref()),
+        repo = shell_quote(&repo),
+        db = shell_quote(&store.path().to_string_lossy()),
+        actor = shell_quote(&format!("agent:planner-{tag}")),
+        system = shell_quote(&system.to_string_lossy()),
+        first = shell_quote(&first),
+        title = name.replace('\'', ""),
+    );
+    let path = dir.join(format!("workyard-plan-project-{tag}.command"));
+    std::fs::write(&path, script).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    std::process::Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"project": id}))
+}
+
 #[tauri::command]
 fn release_session_hold(card: String) -> Result<Value, String> {
     wrap(store()?.release_task_session_hold("ui", &card))
@@ -522,6 +678,10 @@ fn main() {
             approve_change,
             open_in_terminal,
             open_planner,
+            open_project_planner,
+            inspect_repository,
+            pick_folder,
+            create_project_from_repository,
             start_orchestrator,
             stop_orchestrator,
             release_session_hold,
@@ -541,6 +701,51 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("workyard-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C").arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .status().unwrap().success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn repository_info_reports_branch_and_dirtiness_and_refuses_non_repositories() {
+        let dir = temp_dir("repo-info");
+        assert!(git_repository_info(&dir.to_string_lossy()).unwrap_err().contains("not a git repository"));
+        assert!(git_repository_info("/no/such/folder/here").unwrap_err().contains("not a folder"));
+        git(&dir, &["init", "-q", "-b", "trunk"]);
+        assert!(git_repository_info(&dir.to_string_lossy()).unwrap_err().contains("no commits"));
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "first"]);
+        let info = git_repository_info(&dir.to_string_lossy()).unwrap();
+        assert_eq!(info["branch"], "trunk");
+        assert_eq!(info["dirty"], false);
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        assert_eq!(git_repository_info(&dir.to_string_lossy()).unwrap()["dirty"], true);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn slugs_and_the_planner_message() {
+        assert_eq!(slug("My  Field Notes!"), "my-field-notes");
+        assert_eq!(slug("***"), "project");
+        let none = project_planner_message("Demo", "p1", "/r", "main", &[]);
+        assert!(none.contains("no board yet") && none.contains("attach-board <board> p1") && none.contains("/r") && none.contains("main"));
+        let some = project_planner_message("Demo", "p1", "/r", "main", &[("B-1".into(), "Core".into())]);
+        assert!(some.contains("- B-1: Core") && some.contains("extend one"));
+        assert!(some.ends_with("Do not claim or start any card."));
+    }
 
     #[test]
     fn bin_export_uses_the_bundled_dir_or_falls_back_to_path() {

@@ -39,3 +39,13 @@ Run `workyard --json projects`, `boards`, and `board <B-1>` for anything related
 ## 5. Check and hand over
 
 Read the board back (`board <B-1>`): the first cards should be ready, nothing should be blocked by a mistake, and every phase should have work. Then stop and tell the human which board to run: `workyard orch run <B-1> --cwd <repository>`. Do not start it yourself.
+
+## Starting from a project with no board
+
+The desktop's Plan button on a project opens you with the project's name, repository path and target branch, and the keys and names of its boards. It never gives you a board to start from.
+
+1. Find the project id with `workyard --json projects` (match the name; the first message also gives it).
+2. If the project has no board, ask the human what they want built before creating anything. If it has boards, ask whether to extend one or create another.
+3. Create the board with `workyard plan create-board "<name>"`, then attach it with `workyard plan attach-board <board> <project-id>`.
+4. Add phases, cards and dependencies as described above. The desktop shows the board as soon as it is attached.
+5. Do not claim or start any card; the orchestrator does that.

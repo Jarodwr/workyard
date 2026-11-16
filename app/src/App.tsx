@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, FolderKanban, LayoutDashboard, UserRound, X } from "lucide-react";
+import { ArrowLeft, FolderKanban, LayoutDashboard, Plus, UserRound, X } from "lucide-react";
 import {
   client,
   isDemo,
@@ -14,6 +14,7 @@ import {
   type ProjectListItem,
 } from "@/api";
 import { BoardView, type BoardSection } from "@/components/workspace/board-view";
+import { NewProjectDialog } from "@/components/workspace/new-project-dialog";
 import { ProjectOverview } from "@/components/workspace/project-view";
 import { StakeholderView } from "@/components/workspace/stakeholder-view";
 import { CardDetail } from "@/components/workspace/card-detail";
@@ -50,6 +51,7 @@ export default function App() {
   const [orchestrator, setOrchestrator] = useState<Orchestrator | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [creatingProject, setCreatingProject] = useState(false);
   // The database path keys what is remembered; empty until the first read finishes.
   const [scope, setScope] = useState("");
   const cursor = useRef(0);
@@ -331,8 +333,19 @@ export default function App() {
             </div>
           ) : projectId===null ? (
             <div className="h-full overflow-auto p-4">
-              <h1 className="text-2xl font-bold tracking-tight">Projects</h1>
-              <p className="mt-1 text-sm text-muted-foreground">Choose a project to see its context and boards.</p>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h1 className="text-2xl font-bold tracking-tight">Projects</h1>
+                  <p className="mt-1 text-sm text-muted-foreground">{projects.length || boards.length ? "Choose a project to see its context and boards." : "Start by creating a project from a git repository."}</p>
+                </div>
+                {(projects.length > 0 || boards.length > 0) && <Button onClick={() => setCreatingProject(true)}><Plus /> New project</Button>}
+              </div>
+              {projects.length === 0 && boards.length === 0 && <div className="mt-8 max-w-md rounded-xl border border-dashed p-8 text-center">
+                <FolderKanban className="mx-auto size-8 text-muted-foreground" />
+                <h2 className="mt-3 text-base font-semibold">No projects yet</h2>
+                <p className="mt-1 text-xs text-muted-foreground">Pick a repository, then open a planner to turn what you want built into a board.</p>
+                <Button className="mt-4" onClick={() => setCreatingProject(true)}><Plus /> New project</Button>
+              </div>}
               <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {projects.map((item)=><button key={item.id} className="rounded-xl border bg-card p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent/40" onClick={()=>{setProjectId(item.id);setSelectedStakeholderId(null);setBoardKey(null);}}><FolderKanban className="size-5 text-primary" /><h2 className="mt-3 text-base font-semibold">{item.name}</h2><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.description || "No description yet."}</p><p className="mt-4 text-xs text-muted-foreground">{item.board_count} {item.board_count===1 ? "board" : "boards"}</p></button>)}
                 {boards.some((item)=>!item.project_id) && <button className="rounded-xl border bg-card p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent/40" onClick={()=>{setProjectId(unassignedId);setBoardKey(null);}}><FolderKanban className="size-5 text-muted-foreground" /><h2 className="mt-3 text-base font-semibold">Unassigned boards</h2><p className="mt-1 text-xs text-muted-foreground">Boards waiting to be attached to a project.</p></button>}
@@ -372,12 +385,24 @@ export default function App() {
           ) : project && project.id===projectId && selectedStakeholder ? (
             <StakeholderView project={project} stakeholder={selectedStakeholder} questions={questions} onAnswer={(question, answer, note) => mutate(() => client.answerQuestion(question, answer, note))} onAssignStakeholder={(question, stakeholderId) => mutate(() => stakeholderId ? client.assignQuestionStakeholder(question, stakeholderId) : client.unassignQuestionStakeholder(question))} />
           ) : project?.id===projectId ? (
-            <ProjectOverview project={project} onOpenBoard={(key) => {setBoardKey(key);setSelectedStakeholderId(null);setSection("dependencies");setPhaseId(null);}} />
+            <ProjectOverview project={project} onPlan={() => void mutate(() => client.openProjectPlanner(project.id))} onOpenBoard={(key) => {setBoardKey(key);setSelectedStakeholderId(null);setSection("dependencies");setPhaseId(null);}} />
           ) : (
             <div className="p-8 text-sm text-muted-foreground">Loading project…</div>
           )}
         </main>
       </div>
+
+      {creatingProject && <NewProjectDialog
+        onClose={() => setCreatingProject(false)}
+        onCreated={(created) => {
+          setCreatingProject(false);
+          setProject(created);
+          setProjectId(created.id);
+          setBoardKey(null);
+          setSelectedStakeholderId(null);
+          void refresh(null, created.id).catch((e) => setError(errorMessage(e)));
+        }}
+      />}
 
       <CardDetail
         card={selected}
