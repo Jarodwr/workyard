@@ -1,6 +1,6 @@
 # Projects: design notes
 
-Board phase scheduling, cancellation, and the phase graph are specified in [ADR 0001](adr/0001-board-phases-and-scheduling.md), [ADR 0002](adr/0002-cancelling-work.md), and [ADR 0003](adr/0003-phase-dependency-graph.md). The core, CLI, MCP adapter, and desktop now implement these rules.
+Board phase scheduling, cancellation, and the phase graph are specified in [ADR 0001](adr/0001-board-phases-and-scheduling.md), [ADR 0002](adr/0002-cancelling-work.md), and [ADR 0003](adr/0003-phase-dependency-graph.md). The core, CLI, and desktop now implement these rules.
 
 Status: project context, code links, review approval, and start/finish dependencies are implemented. The local Git train runner and hosted review observation remain open.
 
@@ -10,7 +10,7 @@ Status: project context, code links, review approval, and start/finish dependenc
 - Projects have stable IDs, names, descriptions, and versions. A board gets an optional `project_id` so existing boards remain readable until assigned.
 - Projects are selected on a full-width picker without a sidebar. Selecting one opens the workspace sidebar with its name and a back arrow. Overview sits above separate Stakeholders and Boards sections. Each stakeholder is listed in the sidebar with the number of open questions assigned to them, including zero; selecting one opens their answerable question cards. The Boards section contains only that project's boards. Overview shows the project's single repository. Opening a board lands on the phase graph; a phase title opens its phase-only Kanban with a back button. Unassigned legacy boards remain accessible through an Unassigned boards entry until an agent attaches them to a project.
 - Keep the large Workyard logo/header block out of the sidebar to make room for project context.
-- Project and board management remain agent actions through named core/CLI/MCP commands. The desktop stays a human review surface.
+- Project and board management remain agent actions through named core/CLI commands. The desktop stays a human review surface.
 
 ## Repositories and code changes
 

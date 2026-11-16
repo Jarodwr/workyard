@@ -4,7 +4,7 @@ Status: agreed design, 2026-11-15. This document supersedes the initial draft an
 
 ## 1. Product and scope
 
-A local-first desktop kanban dashboard for work done with AI agents. All persistent data lives in SQLite on the user's machine. The desktop is a human review surface: it displays agent work, accepts answers to questions, and lets the human append notes to cards. Agents create and manage work through named CLI and MCP commands. An open board reacts to each committed event, including actions made by an agent outside the app.
+A local-first desktop kanban dashboard for work done with AI agents. All persistent data lives in SQLite on the user's machine. The desktop is a human review surface: it displays agent work, accepts answers to questions, and lets the human append notes to cards. Agents create and manage work through named CLI commands. An open board reacts to each committed event, including actions made by an agent outside the app.
 
 ### Which document is authoritative
 
@@ -24,9 +24,9 @@ The local train runner and hosted review observation remain open. Legacy data (`
 ### Goals
 
 - Multiple boards with three fixed lanes (Backlog, In Progress, Done), ordered cards, dependency impact, blocked state, and engineering and business questions with answer options.
-- Smooth movement between lanes for external CLI/MCP actions.
+- Smooth movement between lanes for external CLI actions.
 - Progress percentage and a short status note visible on every card.
-- Agent-friendly reads and writes through named CLI commands and MCP tools.
+- Agent-friendly reads and writes through named CLI commands.
 - Exclusive ownership of a claimed card by one agent, with optimistic version checks on edits.
 - Local operation, with no account or network service required.
 
@@ -45,10 +45,10 @@ The local train runner and hosted review observation remain open. Legacy data (`
 | Frontend | React, TypeScript, Vite, Motion (`motion/react`); dnd-kit if drag is included |
 | Shared core | Rust `workyard-core`, `rusqlite` with bundled SQLite, `serde`, `thiserror` |
 | CLI | Rust `workyard` binary using `clap` and `workyard-core` |
-| MCP | Rust `workyard-mcp` binary using the official `rmcp` SDK and stdio; invokes `workyard --json` |
+| Agent access | The `workyard` CLI with `--json`, plus a Claude Code plugin (`plugin/`: skill and actor hook). There is no MCP server; the app is local and agents have a shell |
 | Database | SQLite with WAL, foreign keys, and busy timeout |
 
-Rust owns the schema, rules, transactions, event construction, CLI, MCP adapter, and Tauri command wrappers. React and TypeScript own presentation, interaction, and animation. Do not add a Node sidecar.
+Rust owns the schema, rules, transactions, event construction, CLI, and Tauri command wrappers. React and TypeScript own presentation, interaction, and animation. Do not add a Node sidecar.
 
 ```text
 workyard/
@@ -57,7 +57,6 @@ workyard/
   crates/
     workyard-core/
     workyard-cli/
-    workyard-mcp/
   app/
     src-tauri/
     src/
@@ -70,9 +69,9 @@ The default DB is in the platform app-data directory (for example `~/Library/App
 
 ## 3. Identity, time, and data model
 
-Every board, lane, card, question, and dependency has its own UUID primary key. UUIDs are internal, stable references. Boards, cards, and questions also have unique, human-friendly display keys such as `B-1`, `C-12`, and `Q-3`, assigned by transactional per-type counters. CLI and MCP accept display keys and return both keys and UUIDs. Lane references accept a UUID or an unambiguous name within a board. Events use an integer, monotonic cursor ID. Timestamps are UTC ISO-8601 text.
+Every board, lane, card, question, and dependency has its own UUID primary key. UUIDs are internal, stable references. Boards, cards, and questions also have unique, human-friendly display keys such as `B-1`, `C-12`, and `Q-3`, assigned by transactional per-type counters. The CLI accepts display keys and return both keys and UUIDs. Lane references accept a UUID or an unambiguous name within a board. Events use an integer, monotonic cursor ID. Timestamps are UTC ISO-8601 text.
 
-The Rust core exposes typed `Card` and `Question` snapshots, distinct board/card/question/lane ID types, enums for lane kind, question kind/status, and legacy priority, plus validated `Progress`, `Version`, and `QuestionOptions` values. Dependencies resolve to a `Card` or `Question` target; question resolution uses an `Answered` or `Dropped` outcome. The core serializes these types to the existing JSON shape for CLI, MCP, Tauri, and events. Existing databases may contain non-UUID historical IDs; their typed ID wrappers preserve those strings, while all newly generated IDs are UUIDs.
+The Rust core exposes typed `Card` and `Question` snapshots, distinct board/card/question/lane ID types, enums for lane kind, question kind/status, and legacy priority, plus validated `Progress`, `Version`, and `QuestionOptions` values. Dependencies resolve to a `Card` or `Question` target; question resolution uses an `Answered` or `Dropped` outcome. The core serializes these types to the existing JSON shape for the CLI, Tauri, and events. Existing databases may contain non-UUID historical IDs; their typed ID wrappers preserve those strings, while all newly generated IDs are UUIDs.
 
 ### Tables
 
@@ -80,7 +79,7 @@ The Rust core exposes typed `Card` and `Question` snapshots, distinct board/card
 |---|---|
 | `boards` | `id` UUID, `key`, `name`, `description`, `created_at`, `archived` boolean, `version` |
 | `lanes` | `id` UUID, `board_id` FK, `name`, `position`, `kind` (`backlog`, `active`, `done`; legacy `review`/`custom` values remain readable for migration), `archived` boolean, `version`; unique active name within a board |
-| `cards` | `id` UUID, `key`, `board_id` FK, `lane_id` FK, `position`, `title`, `description`, legacy `priority` (`P0`–`P3`, retained for database and core API compatibility; ignored by CLI/MCP and scheduling), `progress` integer 0–100, `status_note`, `agent_type` free text, `owner_actor` nullable, `created_at`, `updated_at`, `version` |
+| `cards` | `id` UUID, `key`, `board_id` FK, `lane_id` FK, `position`, `title`, `description`, legacy `priority` (`P0`–`P3`, retained for database and core API compatibility; ignored by the CLI and scheduling), `progress` integer 0–100, `status_note`, `agent_type` free text, `owner_actor` nullable, `created_at`, `updated_at`, `version` |
 | `card_notes` | `id` UUID, `board_id` FK, `card_id` FK, `actor`, `body`, `created_at`; append-only comments separate from agent-owned card fields |
 | `task_sessions` | `id` UUID, `card_id` FK, owner actor, runner, external session ID, attach/pause/detach times, optional waiting question FK, and last delivered event ID; at most one attached session per task |
 | `questions` | `id` UUID, `key`, `board_id` FK, `kind` (`engineering`, `business`), `title`, `body`, `options_json` (2–10 distinct substantive choices plus `Other`), `recommended_option` (one of the choices), `recommendation_reason` (plain-language, at most 280 characters), `status` (`open`, `answered`, `dropped`), selected `answer`, optional `answer_note`, `owner`, `created_at`, `answered_at`, `version` |
@@ -122,9 +121,9 @@ Migration 6 ensures existing questions have exactly one canonical `Other` choice
 
 `claim_card(card, expected_version)` sets `owner_actor` to the caller and increments the card version. A claimed card's fields, lane, progress, and outgoing dependency links may be changed or released only by that exact owner actor. `agent_type` names the capability needed for a task, such as Frontend or Documentation; `owner_actor` identifies the agent currently holding the work lock. An unclaimed card can be edited by any local actor. Claiming an already claimed card fails with `ownership_conflict` and identifies the owner.
 
-`release_card` requires the owner and expected version. `transfer_card` requires the current owner and expected version. `force_release_card` is an explicit local recovery command for a dead agent; it records actor, reason, and previous owner in the event. It is available through the CLI, and may be exposed to MCP only as a clearly named recovery tool. Since actors are local strings rather than authenticated principals, this is cooperative process ownership, not protection from a malicious same-user process.
+`release_card` requires the owner and expected version. `transfer_card` requires the current owner and expected version. `force_release_card` is an explicit local recovery command for a dead agent; it records actor, reason, and previous owner in the event. It is available through the CLI. Since actors are local strings rather than authenticated principals, this is cooperative process ownership, not protection from a malicious same-user process.
 
-Card notes are separate append-only records. A human can add a note to an agent-owned card without editing the card's content, owner, status note, or version. Each note has its own UUID and causes one `card_note_added` event. Agents can read notes in `view_card` and may append notes through the CLI/MCP as well.
+Card notes are separate append-only records. A human can add a note to an agent-owned card without editing the card's content, owner, status note, or version. Each note has its own UUID and causes one `card_note_added` event. Agents can read notes in `view_card` and may append notes through the CLI as well.
 
 Every semantic mutation of a card, including claim/release, move, progress, and outgoing dependency changes, requires `expected_version` and increments `version`. Position renormalization of sibling cards is lane-order housekeeping: it may shift their stored position, but does not change their content or version. Version conflicts include the current card so the caller can reread and retry. A long-held mutex or lock is not used. A write to a prerequisite card or question can change a claimed card's **derived** blocked state without editing the claimed card. If a new dependency on an owned card is discovered, the owner adds it after being informed; another actor does not silently edit its links.
 
@@ -179,7 +178,7 @@ Do not add generic SQL or arbitrary file tools. If a new capability is needed, a
 
 Review is a decision on a ticket, not a separate lane. The default board has Backlog, In Progress, and Done. An agent keeps its owned ticket In Progress and raises a linked review question when it wants a human decision. The question presents concrete choices such as Approve and Request changes, plus the automatic Other choice. The human's answer and explanation are recorded in the question event; the external orchestrator delivers them to the current ticket owner.
 
-The agent interprets the response and makes the next CLI/MCP action. On approval it may move the ticket to Done. On Request changes it revises the same ticket using the feedback, and raises a new review question when ready. For Other it follows the explanation or asks for clarification. It creates a separate task only when the feedback is genuinely separate work. Workyard does not automatically move a ticket, create rework, or ask a second “ready yet?” question. No new review-specific command is required for this cooperative workflow.
+The agent interprets the response and makes the next CLI action. On approval it may move the ticket to Done. On Request changes it revises the same ticket using the feedback, and raises a new review question when ready. For Other it follows the explanation or asks for clarification. It creates a separate task only when the feedback is genuinely separate work. Workyard does not automatically move a ticket, create rework, or ask a second “ready yet?” question. No new review-specific command is required for this cooperative workflow.
 
 Existing boards may still have legacy Review lanes. Those lanes remain readable so their cards can be moved out through owner-authorized commands, then the empty lanes can be archived. New cards and moves cannot target them. Existing questions do not have a review-specific marker. Answering any question clears that question's dependency, regardless of the selected option. A separately configured review approval gate on a linked code change does prevent a Done move until the current commit is approved. The external orchestrator still needs to deliver answered questions and state changes to ticket owners.
 
@@ -221,59 +220,48 @@ An orchestrator attaches a resumable runtime session to a claimed In Progress ta
 
 The UI treats events as animation cues. A single event with multiple effects triggers the corresponding card pulses together. Initial load draws the current state without replaying historical animations. If more than about ten events accumulated, use one quick fade or restrained stagger rather than dozens of tweens.
 
-## 7. CLI and MCP
+## 7. CLI and agent plugin
 
-Every CLI command accepts `--db`, `--actor`, and `--json`. JSON mode writes exactly one structured result to stdout, including typed errors; diagnostics go to stderr. Exit codes: 0 success, 1 usage, 2 validation/rule failure, 3 version/ownership conflict. Human-readable output is the default.
+Every CLI command accepts `--db`, `--actor` (or `WORKYARD_ACTOR`), and `--json`. JSON mode writes exactly one structured result to stdout, including typed errors; diagnostics go to stderr. Exit codes: 0 success, 1 usage, 2 validation/rule failure, 3 version/ownership conflict. Human-readable output is the default.
 
-Representative CLI surface (each mutating existing entity includes `--expected-version`):
+Commands are grouped by who calls them. Reads stay at the top level. Each mutating command on an existing entity takes `--expected-version`, except notes and (planned) writes by a card's owner.
 
 ```text
-workyard boards
-workyard board <B-1> [--lane X] [--blocked] [--json]
-workyard card <C-1>
-workyard note <C-1> "Comment for the agent"
-workyard create-board "Project" [--description ...]
-workyard archive-board <B-1> --expected-version N
-workyard unarchive-board <B-1> --expected-version N
-workyard archive-lane <legacy-lane> --expected-version N  # empty legacy lane cleanup only
-workyard add-card <B-1> "Title" [--agent-type Frontend] [--lane Backlog] [--desc ...]
-workyard claim <C-1> --expected-version N
-workyard release <C-1> --expected-version N
-workyard transfer <C-1> --to-actor agent:name --expected-version N
-workyard force-release <C-1> --reason "Agent stopped" --expected-version N
-workyard update <C-1> --expected-version N [--title ...] [--agent-type ...] [--desc ...]
-workyard move <C-1> "In Progress" --expected-version N [--position N]
-workyard progress <C-1> 40 --expected-version N [--note ...]
-workyard cancel <C-1> --reason "Obsolete" --expected-version N
-workyard depend <C-1> --on <C-2|Q-3> [--scope start|finish] --expected-version N
-workyard undepend <C-1> --on <C-2|Q-3> --expected-version N
-workyard scope-dependency <dependency> start|finish --expected-version N
-workyard phase list|add|describe|complete|advance|assign ...        # ADR 0001
-workyard projects | project <P> | create-project | attach-board
-workyard add-repository | add-document | add-stakeholder
-workyard assign-stakeholder <Q-3> <stakeholder> --expected-version N
-workyard unassign-stakeholder <Q-3> --expected-version N
-workyard link-change <C-1> <repository> <branch> [--review-required] --expected-version N
-workyard update-change <change> <commit> --expected-version N
-workyard require-review <change> --required true|false --expected-version N --expected-card-version N
-workyard approve-change <change> <reviewer> --expected-version N
-workyard ask <B-1> --kind engineering "Question" --option "Choice A" --option "Choice B" --recommend "Choice A" --why "Simple reason" [--body ...] [--blocks C-1,C-2]
-workyard question-options <Q-3> --expected-version N --option "Choice A" --option "Choice B" --recommend "Choice B" --why "Simple reason"
-workyard answer <Q-3> "Choice A" --expected-version N [--note "Why"]
-workyard drop <Q-3> --reason "No longer relevant" --expected-version N
-workyard questions [B-1] [--open] [--kind engineering|business]
-workyard next <B-1> [--agent-type Frontend]
-workyard session attach <C-1> --runner codex --session-id <runtime-session-id>
-workyard session pause <C-1> [--waiting-question Q-3]
-workyard session briefing <C-1> [--limit N] [--after EVENT_ID]
-workyard session ack <C-1> --through-event-id N
-workyard session resume <C-1>
-workyard session detach <C-1>
-workyard history <B-1|C-1> [--since N] [--limit N]
-workyard events --since N [--limit N] --json
+# reads (anyone)
+workyard boards | board <B-1> [--phase P] [--lane X] [--blocked] | card <C-1>
+workyard projects | project <P> | questions [B-1] [--open] [--kind K]
+workyard next <B-1> [--agent-type T] | history <B-1|C-1> | events --since N
+
+# task: a worker agent on a card
+workyard task claim|release <C-1>          workyard task move <C-1> <lane>
+workyard task progress <C-1> 40 [--note]   workyard task note <C-1> "text"
+workyard task update <C-1> [--title|--desc|--agent-type]
+workyard task add-card <B-1> "Title" [--phase P]
+workyard task depend|undepend <C-1> --on <C-2|Q-3> [--scope start|finish]
+workyard task ask <B-1> "Title" --kind K --option A --option B --recommend A --why "..." [--blocks C-1]
+workyard task question-options <Q-3> ...
+workyard task link-change <C-1> <repo> <branch> [--review-required]
+workyard task update-change <change> <commit>
+workyard task require-review <change> --required true|false
+
+# plan: project and board structure
+workyard plan create-project|create-board|attach-board|add-repository|add-document|add-stakeholder
+workyard plan assign-stakeholder|unassign-stakeholder <Q-3> ...
+workyard plan phase list|add|describe|complete|advance|assign
+workyard plan cancel <C-1> --reason "..."
+
+# orch: orchestrator and operator
+workyard orch session attach|pause|resume|ack|detach|briefing <C-1> ...
+workyard orch transfer <C-1> --to-actor A
+workyard orch force-release <C-1> --reason "..."
+
+# admin: humans and recovery
+workyard admin archive-board|unarchive-board|archive-lane|scope-dependency|answer|drop ...
 ```
 
-The MCP server has one named tool per core read/write command. Each tool has a specific description and JSON input schema; descriptions encourage `update_progress` with a short note after meaningful progress. The MCP server translates input to CLI arguments, launches `workyard --json`, parses the structured result, and returns structured content plus a short text summary. It must never parse human-readable CLI output. Set an actor such as `mcp:<configured-client-name>`; use a stable configured name rather than assuming the protocol exposes a trustworthy agent identity. Agents that claim cards must reuse the same actor string for later edits. The CLI path is configurable for development and packaging. Do not expose raw SQL or arbitrary file access.
+Review approval has no CLI command. A human approves the current commit of a linked change in the desktop, so an agent cannot approve its own work.
+
+There is no MCP server. Agents run locally with a shell, so they call the CLI directly. The Claude Code plugin in `plugin/` provides a `workyard` skill describing the worker loop and a `SessionStart` hook that sets `WORKYARD_ACTOR` when the orchestrator has not. Actor strings must stay stable for a session, since ownership is checked against them. Do not expose raw SQL or arbitrary file access.
 
 The Tauri backend calls `workyard-core` directly through thin `#[tauri::command]` wrappers with actor `ui`. It exposes reads and only two write commands: `answer_question` and `add_card_note`. It opens its own connection and obeys the same command and ownership checks. Do not use a generic webview SQL plugin.
 
@@ -286,15 +274,15 @@ The Tauri backend calls `workyard-core` directly through thin `#[tauri::command]
 - Task detail modal: a centered, scrollable dialog for the card description, owner and version, read-only progress and agent status note, blockers and downstream cards, append-only human notes, and event history. Match the question dialog's backdrop and rounded styling.
 - Dependency view: a prerequisite-first directed graph, layered by dependency depth rather than kanban lane. Arrows point from a prerequisite to the work it enables. Mark unresolved and resolved links differently; highlight the longest chain by number of nodes and current chokepoints, measured by the number of distinct downstream cards held by unresolved links. Outline an open question in red when at least one unfinished task it blocks has unresolved question dependencies but no unresolved task dependencies. Evaluate this against the full board before phase filtering, so hidden work cannot cause a false highlight. These are dependency measures, not schedule estimates. Put the line-style legend beneath the scrollable graph; keep summary counts and controls above it. Selecting a node highlights its upstream and downstream chain; card links open details and open question nodes show an answer dialog with an optional stakeholder assignment control; answered questions are omitted. Completed phases are hidden by default and can be shown with a toggle. Show only nodes and links in the selected phase, with metrics scoped to that phase; the default graph shows current and future phases. Phase headings stay at the top of the scrolling graph and open phase Kanban views. Provide zoom and scrolling for larger graphs. Hide disconnected cards from the graph.
 - No Gantt chart. The dependency graph communicates sequencing and chokepoints without inventing dates.
-- Human actions in the desktop: optionally assign, reassign, or unassign a project stakeholder on a question, select an answer option, optionally explain it, and append notes to cards. Board, lane, card, ownership, progress, dependency, question creation, and option editing controls are absent. Agents manage these through the CLI/MCP. Recovery uses an explicit CLI command.
+- Human actions in the desktop: optionally assign, reassign, or unassign a project stakeholder on a question, select an answer option, optionally explain it, and append notes to cards. Board, lane, card, ownership, progress, dependency, question creation, and option editing controls are absent. Agents manage these through the CLI. Recovery uses an explicit CLI command.
 
 ### Card
 
-Keep task cards dense: show a bold title, agent type, a compact progress row, and status note only when present. Show blocked state and question count inline. Show blocking impact as a small count when nonzero. Omit display keys from task and question cards; keep them in detail views and CLI/MCP output for reference. Keep owner identity, full description, dependencies, and notes in the task detail modal. Engineering and business question cards use identical shape, border, spacing, typography, and icon; only their colors differ (blue and amber). The tabs identify the kind, so question cards do not repeat it. Both show all selectable answer options and the agent's recommended choice with a simple reason when available. The mixed dependency graph labels each kind while preserving the same structure for both. A recommendation never selects an option for the human. Support light/dark modes and system fonts.
+Keep task cards dense: show a bold title, agent type, a compact progress row, and status note only when present. Show blocked state and question count inline. Show blocking impact as a small count when nonzero. Omit display keys from task and question cards; keep them in detail views and CLI output for reference. Keep owner identity, full description, dependencies, and notes in the task detail modal. Engineering and business question cards use identical shape, border, spacing, typography, and icon; only their colors differ (blue and amber). The tabs identify the kind, so question cards do not repeat it. Both show all selectable answer options and the agent's recommended choice with a simple reason when available. The mixed dependency graph labels each kind while preserving the same structure for both. A recommendation never selects an option for the human. Support light/dark modes and system fonts.
 
 ### Animation contract
 
-Use Motion layout animation (`layout`/`layoutId`) and a board-level `LayoutGroup`. A move between lanes, including one made through CLI or MCP, should tween from old to new position in about 350–450 ms. Siblings shift smoothly. An external move briefly highlights the card for about 1.2 s. Progress bar and number animate; note cross-fades. Blocked and ready badges animate, and newly ready cards pulse briefly. Respect `prefers-reduced-motion` with instant changes or simple fades. Filter changes animate card entrances/exits.
+Use Motion layout animation (`layout`/`layoutId`) and a board-level `LayoutGroup`. A move between lanes, including one made through the CLI, should tween from old to new position in about 350–450 ms. Siblings shift smoothly. An external move briefly highlights the card for about 1.2 s. Progress bar and number animate; note cross-fades. Blocked and ready badges animate, and newly ready cards pulse briefly. Respect `prefers-reduced-motion` with instant changes or simple fades. Filter changes animate card entrances/exits.
 
 Card visual identity is keyed by stable UUID. Moving between lane parents may remount a React component even when `layoutId` creates a visual transition. Keep transient state that must survive (such as the selected detail and unsent note draft) above the lane-rendered component. Use shared layout transitions or a stable rendering layer as needed, and verify actual behavior in the prototype. For scrollable lanes, account for scroll position in layout measurement. Do not queue a separate animation for every event in a large catch-up batch.
 
@@ -304,10 +292,10 @@ Card visual identity is keyed by stable UUID. Moving between lane parents may re
 - Every successful write produces one primary event with all effects; failures produce none. Event effects correctly report cards becoming blocked/ready only on real transitions.
 - Rule tests cover progress bounds, blocked active move, cycle/self/cross-board dependency rejection, question resolution, archived targets, owner conflict, version conflict, and force release.
 - A non-owner cannot change a claimed card's fields, lane, progress, or outgoing dependencies. The owner can; a stale owner version cannot.
-- CLI integration tests use a temp DB and JSON mode. MCP integration tests speak stdio protocol and exercise every tool through the CLI adapter.
+- CLI integration tests use a temp DB and JSON mode. Plugin checks confirm the skill's commands exist in the grouped CLI.
 - With the app open, an external CLI move appears within about half a second, animates between lanes, highlights, and preserves an open card detail draft. Test reduced motion separately.
 - The desktop exposes no board, lane, or card management writes. A human can answer an open question and add a note to an agent-owned card; the note leaves the card version and owner unchanged.
-- An agent using only MCP can create a board/cards, claim a ready card, move it, update progress with notes, raise and answer a question, and release or transfer ownership.
+- An agent using only the CLI and plugin can create a board/cards, claim a ready card, move it, update progress with notes, raise and answer a question, and release or transfer ownership.
 - A sample orchestrator consumer or contract test replays an event where a claimed card becomes blocked and confirms it identifies the owner and cause once, with no edit to the owned card. Delivery through a specific orchestrator is tested when one is integrated.
 - No adapter provides arbitrary SQL; blocked state is always derived.
 
@@ -315,4 +303,3 @@ Card visual identity is keyed by stable UUID. Moving between lane parents may re
 
 - [SQLite foreign keys](https://www.sqlite.org/foreignkeys.html) and [PRAGMAs](https://www.sqlite.org/pragma.html): foreign keys and busy timeout are connection settings.
 - [Motion layout animation](https://motion.dev/docs/react-layout-animations): shared layout transitions and grouped layout updates.
-- [Official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk): pin a tested `rmcp` release and its stdio API when coding.

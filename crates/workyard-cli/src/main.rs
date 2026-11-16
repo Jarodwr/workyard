@@ -9,7 +9,7 @@ use workyard_core::{BoardFilter, Error, Store};
 struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
-    #[arg(long, global = true, default_value = "cli")]
+    #[arg(long, global = true, env = "WORKYARD_ACTOR", default_value = "cli")]
     actor: String,
     #[arg(long, global = true)]
     json: bool,
@@ -19,27 +19,220 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Manage the agent session attached to an In Progress task.
-    Session {
+    /// Work on a card: claim, report progress, ask questions, link code changes.
+    Task {
         #[command(subcommand)]
-        command: SessionCommand,
+        command: TaskCommand,
     },
-    Phase {
+    /// Shape projects, boards, phases, and structure.
+    Plan {
         #[command(subcommand)]
-        command: PhaseCommand,
+        command: PlanCommand,
     },
-    Cancel {
+    /// Orchestrator and operator controls: sessions and ownership recovery.
+    Orch {
+        #[command(subcommand)]
+        command: OrchCommand,
+    },
+    /// Human and recovery actions: archive, resolve questions, dependency scope.
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
+    Boards,
+    Board {
+        board: String,
+        #[arg(long)]
+        phase: Option<String>,
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long)]
+        agent_type: Option<String>,
+        #[arg(long)]
+        blocked: bool,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    Card {
         card: String,
-        #[arg(long)]
-        reason: String,
-        #[arg(long)]
-        expected_version: i64,
     },
     Projects,
     Project {
         project: String,
     },
+    Questions {
+        board: Option<String>,
+        #[arg(long)]
+        open: bool,
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    Next {
+        board: String,
+        #[arg(long)]
+        agent_type: Option<String>,
+    },
+    History {
+        entity: String,
+        #[arg(long, default_value_t = 0)]
+        since: i64,
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
+    Events {
+        #[arg(long, default_value_t = 0)]
+        since: i64,
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskCommand {
+    Claim {
+        card: String,
+        #[arg(long)]
+        expected_version: i64,
+    },
+    Release {
+        card: String,
+        #[arg(long)]
+        expected_version: i64,
+    },
+    Move {
+        card: String,
+        lane: String,
+        #[arg(long)]
+        position: Option<i64>,
+        #[arg(long)]
+        expected_version: i64,
+    },
+    Progress {
+        card: String,
+        progress: i64,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        expected_version: i64,
+    },
+    Note {
+        card: String,
+        body: String,
+    },
+    Update {
+        card: String,
+        #[arg(long)]
+        expected_version: i64,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        desc: Option<String>,
+        #[arg(long)]
+        agent_type: Option<String>,
+    },
+    AddCard {
+        board: String,
+        title: String,
+        #[arg(long)]
+        phase: Option<String>,
+        #[arg(long, default_value = "")]
+        desc: String,
+        #[arg(long)]
+        agent_type: Option<String>,
+        #[arg(long)]
+        lane: Option<String>,
+    },
+    Depend {
+        card: String,
+        #[arg(long)]
+        on: String,
+        #[arg(long, default_value = "start")]
+        scope: String,
+        #[arg(long)]
+        expected_version: i64,
+    },
+    Undepend {
+        card: String,
+        #[arg(long)]
+        on: String,
+        #[arg(long)]
+        expected_version: i64,
+    },
+    Ask {
+        board: String,
+        title: String,
+        #[arg(long)]
+        phase: Option<String>,
+        #[arg(long)]
+        kind: String,
+        #[arg(long, default_value = "")]
+        body: String,
+        #[arg(
+            long = "option",
+            required = true,
+            help = "Substantive choice; repeat 2-10 times. Other is added automatically"
+        )]
+        options: Vec<String>,
+        #[arg(long)]
+        recommend: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long, value_delimiter = ',')]
+        blocks: Vec<String>,
+    },
+    QuestionOptions {
+        question: String,
+        #[arg(long)]
+        expected_version: i64,
+        #[arg(
+            long = "option",
+            required = true,
+            help = "Substantive choice; repeat 2-10 times. Other is added automatically"
+        )]
+        options: Vec<String>,
+        #[arg(long)]
+        recommend: String,
+        #[arg(long)]
+        why: String,
+    },
+    LinkChange {
+        card: String,
+        repository: String,
+        branch: String,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, default_value = "")]
+        commit: String,
+        #[arg(long)]
+        review_required: bool,
+        #[arg(long)]
+        expected_version: i64,
+    },
+    UpdateChange {
+        change: String,
+        commit: String,
+        #[arg(long)]
+        expected_version: i64,
+    },
+    RequireReview {
+        change: String,
+        #[arg(long)]
+        required: bool,
+        #[arg(long)]
+        expected_version: i64,
+        #[arg(long)]
+        expected_card_version: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlanCommand {
     CreateProject {
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+    },
+    CreateBoard {
         name: String,
         #[arg(long, default_value = "")]
         description: String,
@@ -86,66 +279,44 @@ enum Command {
         #[arg(long)]
         expected_version: i64,
     },
-    LinkChange {
+    Phase {
+        #[command(subcommand)]
+        command: PhaseCommand,
+    },
+    Cancel {
         card: String,
-        repository: String,
-        branch: String,
         #[arg(long)]
-        target: Option<String>,
-        #[arg(long, default_value = "")]
-        commit: String,
-        #[arg(long)]
-        review_required: bool,
+        reason: String,
         #[arg(long)]
         expected_version: i64,
     },
-    UpdateChange {
-        change: String,
-        commit: String,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    RequireReview {
-        change: String,
-        #[arg(long)]
-        required: bool,
-        #[arg(long)]
-        expected_version: i64,
-        #[arg(long)]
-        expected_card_version: i64,
-    },
-    ApproveChange {
-        change: String,
-        reviewer: String,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    Boards,
-    Board {
-        board: String,
-        #[arg(long)]
-        phase: Option<String>,
-        #[arg(long)]
-        lane: Option<String>,
-        #[arg(long)]
-        agent_type: Option<String>,
-        #[arg(long)]
-        blocked: bool,
-        #[arg(long)]
-        text: Option<String>,
-    },
-    Card {
+}
+
+#[derive(Subcommand)]
+enum OrchCommand {
+    Transfer {
         card: String,
+        #[arg(long)]
+        to_actor: String,
+        #[arg(long)]
+        expected_version: i64,
     },
-    Note {
+    ForceRelease {
         card: String,
-        body: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        expected_version: i64,
     },
-    CreateBoard {
-        name: String,
-        #[arg(long, default_value = "")]
-        description: String,
+    /// Manage the agent session attached to an In Progress task.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum AdminCommand {
     ArchiveBoard {
         board: String,
         #[arg(long)]
@@ -162,127 +333,11 @@ enum Command {
         #[arg(long)]
         expected_version: i64,
     },
-    AddCard {
-        board: String,
-        title: String,
-        #[arg(long)]
-        phase: Option<String>,
-        #[arg(long, default_value = "")]
-        desc: String,
-        #[arg(long)]
-        agent_type: Option<String>,
-        #[arg(long)]
-        lane: Option<String>,
-    },
-    Update {
-        card: String,
-        #[arg(long)]
-        expected_version: i64,
-        #[arg(long)]
-        title: Option<String>,
-        #[arg(long)]
-        desc: Option<String>,
-        #[arg(long)]
-        agent_type: Option<String>,
-    },
-    Claim {
-        card: String,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    Release {
-        card: String,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    Transfer {
-        card: String,
-        #[arg(long)]
-        to_actor: String,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    ForceRelease {
-        card: String,
-        #[arg(long)]
-        reason: String,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    Move {
-        card: String,
-        lane: String,
-        #[arg(long)]
-        position: Option<i64>,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    Progress {
-        card: String,
-        progress: i64,
-        #[arg(long)]
-        note: Option<String>,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    Depend {
-        card: String,
-        #[arg(long)]
-        on: String,
-        #[arg(long, default_value = "start")]
-        scope: String,
-        #[arg(long)]
-        expected_version: i64,
-    },
-    Undepend {
-        card: String,
-        #[arg(long)]
-        on: String,
-        #[arg(long)]
-        expected_version: i64,
-    },
     ScopeDependency {
         dependency: String,
         scope: String,
         #[arg(long)]
         expected_version: i64,
-    },
-    Ask {
-        board: String,
-        title: String,
-        #[arg(long)]
-        phase: Option<String>,
-        #[arg(long)]
-        kind: String,
-        #[arg(long, default_value = "")]
-        body: String,
-        #[arg(
-            long = "option",
-            required = true,
-            help = "Substantive choice; repeat 2-10 times. Other is added automatically"
-        )]
-        options: Vec<String>,
-        #[arg(long)]
-        recommend: String,
-        #[arg(long)]
-        why: String,
-        #[arg(long, value_delimiter = ',')]
-        blocks: Vec<String>,
-    },
-    QuestionOptions {
-        question: String,
-        #[arg(long)]
-        expected_version: i64,
-        #[arg(
-            long = "option",
-            required = true,
-            help = "Substantive choice; repeat 2-10 times. Other is added automatically"
-        )]
-        options: Vec<String>,
-        #[arg(long)]
-        recommend: String,
-        #[arg(long)]
-        why: String,
     },
     Answer {
         question: String,
@@ -298,31 +353,6 @@ enum Command {
         reason: String,
         #[arg(long)]
         expected_version: i64,
-    },
-    Questions {
-        board: Option<String>,
-        #[arg(long)]
-        open: bool,
-        #[arg(long)]
-        kind: Option<String>,
-    },
-    Next {
-        board: String,
-        #[arg(long)]
-        agent_type: Option<String>,
-    },
-    History {
-        entity: String,
-        #[arg(long, default_value_t = 0)]
-        since: i64,
-        #[arg(long, default_value_t = 100)]
-        limit: i64,
-    },
-    Events {
-        #[arg(long, default_value_t = 0)]
-        since: i64,
-        #[arg(long, default_value_t = 100)]
-        limit: i64,
     },
 }
 
@@ -390,115 +420,10 @@ enum SessionCommand {
 
 fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Value> {
     Ok(match command {
-        Command::Session { command } => match command {
-            SessionCommand::Attach { card, runner, session_id } => store.attach_task_session(actor, &card, &runner, &session_id)?,
-            SessionCommand::Pause { card, waiting_question } => store.pause_task_session(actor, &card, waiting_question.as_deref())?,
-            SessionCommand::Resume { card } => store.resume_task_session(actor, &card)?,
-            SessionCommand::Ack { card, through_event_id } => store.acknowledge_task_session(actor, &card, through_event_id)?,
-            SessionCommand::Detach { card } => store.detach_task_session(actor, &card)?,
-            SessionCommand::Briefing { card, limit, after } => store.task_session_briefing(&card, limit, after)?,
-        },
-        Command::Phase { command } => match command {
-            PhaseCommand::List { board } => store.list_phases(&board)?,
-            PhaseCommand::Add { board, name, description } => store.add_phase_with_description(actor, &board, &name, &description)?,
-            PhaseCommand::Describe { board, phase, description, expected_version } => store.describe_phase(actor, &board, &phase, &description, expected_version)?,
-            PhaseCommand::Complete { board } => store.complete_phase(actor, &board)?,
-            PhaseCommand::Advance { board } => store.advance_phase(actor, &board)?,
-            PhaseCommand::Assign {
-                item,
-                phase,
-                expected_version,
-            } => store.assign_phase(actor, &item, &phase, expected_version)?,
-        },
-        Command::Cancel {
-            card,
-            reason,
-            expected_version,
-        } => store.cancel_card(actor, &card, &reason, expected_version)?,
-        Command::Projects => store.list_projects()?,
-        Command::Project { project } => store.view_project(&project)?,
-        Command::CreateProject { name, description } => {
-            store.create_project(actor, &name, &description)?
-        }
-        Command::AttachBoard {
-            board,
-            project,
-            expected_version,
-        } => store.attach_board_to_project(actor, &board, &project, expected_version)?,
-        Command::AddRepository {
-            project,
-            path,
-            target_branch,
-            remote_url,
-        } => store.add_project_repository(
-            actor,
-            &project,
-            &path,
-            &target_branch,
-            remote_url.as_deref(),
-        )?,
-        Command::AddDocument {
-            project,
-            repository,
-            path,
-            kind,
-            title,
-        } => store.add_project_document(actor, &project, &repository, &path, &kind, &title)?,
-        Command::AddStakeholder {
-            project,
-            name,
-            role,
-            contact,
-        } => store.add_project_stakeholder(actor, &project, &name, &role, &contact)?,
-        Command::AssignStakeholder {
-            question,
-            stakeholder,
-            expected_version,
-        } => store.assign_question_stakeholder(actor, &question, &stakeholder, expected_version)?,
-        Command::UnassignStakeholder {
-            question,
-            expected_version,
-        } => store.unassign_question_stakeholder(actor, &question, expected_version)?,
-        Command::LinkChange {
-            card,
-            repository,
-            branch,
-            target,
-            commit,
-            review_required,
-            expected_version,
-        } => store.link_card_change(
-            actor,
-            &card,
-            &repository,
-            &branch,
-            target.as_deref(),
-            &commit,
-            review_required,
-            expected_version,
-        )?,
-        Command::UpdateChange {
-            change,
-            commit,
-            expected_version,
-        } => store.update_card_change(actor, &change, &commit, expected_version)?,
-        Command::RequireReview {
-            change,
-            required,
-            expected_version,
-            expected_card_version,
-        } => store.set_change_review_required(
-            actor,
-            &change,
-            required,
-            expected_version,
-            expected_card_version,
-        )?,
-        Command::ApproveChange {
-            change,
-            reviewer,
-            expected_version,
-        } => store.approve_card_change(actor, &change, &reviewer, expected_version)?,
+        Command::Task { command } => run_task(store, actor, command)?,
+        Command::Plan { command } => run_plan(store, actor, command)?,
+        Command::Orch { command } => run_orch(store, actor, command)?,
+        Command::Admin { command } => run_admin(store, actor, command)?,
         Command::Boards => store.list_boards()?,
         Command::Board {
             board,
@@ -518,23 +443,65 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
             },
         )?,
         Command::Card { card } => store.view_card(&card)?,
-        Command::Note { card, body } => store.add_card_note(actor, &card, &body)?,
-        Command::CreateBoard { name, description } => {
-            store.create_board(actor, &name, &description)?
+        Command::Projects => store.list_projects()?,
+        Command::Project { project } => store.view_project(&project)?,
+        Command::Questions { board, open, kind } => store.list_questions_filtered(
+            board.as_deref(),
+            if open { Some("open") } else { None },
+            kind.as_deref(),
+        )?,
+        Command::Next { board, agent_type } => {
+            store.next_ready_task(&board, agent_type.as_deref())?
         }
-        Command::ArchiveBoard {
-            board,
+        Command::History {
+            entity,
+            since,
+            limit,
+        } => store.view_history(&entity, since, limit)?,
+        Command::Events { since, limit } => store.poll_events(since, limit)?,
+
+    })
+}
+
+fn run_task(store: &Store, actor: &str, command: TaskCommand) -> workyard_core::Result<Value> {
+    Ok(match command {
+        TaskCommand::Claim {
+            card,
             expected_version,
-        } => store.set_board_archived(actor, &board, expected_version, true)?,
-        Command::UnarchiveBoard {
-            board,
+        } => store.claim_card(actor, &card, expected_version)?,
+        TaskCommand::Release {
+            card,
             expected_version,
-        } => store.set_board_archived(actor, &board, expected_version, false)?,
-        Command::ArchiveLane {
+        } => store.release_card(actor, &card, expected_version, None)?,
+        TaskCommand::Move {
+            card,
             lane,
+            position,
             expected_version,
-        } => store.set_lane_archived(actor, &lane, expected_version, true)?,
-        Command::AddCard {
+        } => store.move_card(actor, &card, &lane, position, expected_version)?,
+        TaskCommand::Progress {
+            card,
+            progress,
+            note,
+            expected_version,
+        } => store.update_progress(actor, &card, progress, note.as_deref(), expected_version)?,
+        TaskCommand::Note { card, body } => store.add_card_note(actor, &card, &body)?,
+        TaskCommand::Update {
+            card,
+            expected_version,
+            title,
+            desc,
+            agent_type,
+        } => store.update_card(
+            actor,
+            &card,
+            expected_version,
+            title.as_deref(),
+            desc.as_deref(),
+            None,
+            agent_type.as_deref(),
+        )?,
+        TaskCommand::AddCard {
             board,
             title,
             phase,
@@ -551,68 +518,18 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
             agent_type.as_deref().unwrap_or(""),
             phase.as_deref(),
         )?,
-        Command::Update {
-            card,
-            expected_version,
-            title,
-            desc,
-            agent_type,
-        } => store.update_card(
-            actor,
-            &card,
-            expected_version,
-            title.as_deref(),
-            desc.as_deref(),
-            None,
-            agent_type.as_deref(),
-        )?,
-        Command::Claim {
-            card,
-            expected_version,
-        } => store.claim_card(actor, &card, expected_version)?,
-        Command::Release {
-            card,
-            expected_version,
-        } => store.release_card(actor, &card, expected_version, None)?,
-        Command::Transfer {
-            card,
-            to_actor,
-            expected_version,
-        } => store.transfer_card(actor, &card, expected_version, &to_actor)?,
-        Command::ForceRelease {
-            card,
-            reason,
-            expected_version,
-        } => store.release_card(actor, &card, expected_version, Some(&reason))?,
-        Command::Move {
-            card,
-            lane,
-            position,
-            expected_version,
-        } => store.move_card(actor, &card, &lane, position, expected_version)?,
-        Command::Progress {
-            card,
-            progress,
-            note,
-            expected_version,
-        } => store.update_progress(actor, &card, progress, note.as_deref(), expected_version)?,
-        Command::Depend {
+        TaskCommand::Depend {
             card,
             on,
             scope,
             expected_version,
         } => store.add_dependency_scoped(actor, &card, &on, &scope, expected_version)?,
-        Command::Undepend {
+        TaskCommand::Undepend {
             card,
             on,
             expected_version,
         } => store.remove_dependency(actor, &card, &on, expected_version)?,
-        Command::ScopeDependency {
-            dependency,
-            scope,
-            expected_version,
-        } => store.set_dependency_scope(actor, &dependency, &scope, expected_version)?,
-        Command::Ask {
+        TaskCommand::Ask {
             board,
             title,
             phase,
@@ -634,7 +551,7 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
             &blocks,
             phase.as_deref(),
         )?,
-        Command::QuestionOptions {
+        TaskCommand::QuestionOptions {
             question,
             expected_version,
             options,
@@ -648,7 +565,154 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
             &recommend,
             &why,
         )?,
-        Command::Answer {
+        TaskCommand::LinkChange {
+            card,
+            repository,
+            branch,
+            target,
+            commit,
+            review_required,
+            expected_version,
+        } => store.link_card_change(
+            actor,
+            &card,
+            &repository,
+            &branch,
+            target.as_deref(),
+            &commit,
+            review_required,
+            expected_version,
+        )?,
+        TaskCommand::UpdateChange {
+            change,
+            commit,
+            expected_version,
+        } => store.update_card_change(actor, &change, &commit, expected_version)?,
+        TaskCommand::RequireReview {
+            change,
+            required,
+            expected_version,
+            expected_card_version,
+        } => store.set_change_review_required(
+            actor,
+            &change,
+            required,
+            expected_version,
+            expected_card_version,
+        )?,
+    })
+}
+
+fn run_plan(store: &Store, actor: &str, command: PlanCommand) -> workyard_core::Result<Value> {
+    Ok(match command {
+        PlanCommand::CreateProject { name, description } => {
+            store.create_project(actor, &name, &description)?
+        }
+        PlanCommand::CreateBoard { name, description } => {
+            store.create_board(actor, &name, &description)?
+        }
+        PlanCommand::AttachBoard {
+            board,
+            project,
+            expected_version,
+        } => store.attach_board_to_project(actor, &board, &project, expected_version)?,
+        PlanCommand::AddRepository {
+            project,
+            path,
+            target_branch,
+            remote_url,
+        } => store.add_project_repository(
+            actor,
+            &project,
+            &path,
+            &target_branch,
+            remote_url.as_deref(),
+        )?,
+        PlanCommand::AddDocument {
+            project,
+            repository,
+            path,
+            kind,
+            title,
+        } => store.add_project_document(actor, &project, &repository, &path, &kind, &title)?,
+        PlanCommand::AddStakeholder {
+            project,
+            name,
+            role,
+            contact,
+        } => store.add_project_stakeholder(actor, &project, &name, &role, &contact)?,
+        PlanCommand::AssignStakeholder {
+            question,
+            stakeholder,
+            expected_version,
+        } => store.assign_question_stakeholder(actor, &question, &stakeholder, expected_version)?,
+        PlanCommand::UnassignStakeholder {
+            question,
+            expected_version,
+        } => store.unassign_question_stakeholder(actor, &question, expected_version)?,
+        PlanCommand::Phase { command } => match command {
+            PhaseCommand::List { board } => store.list_phases(&board)?,
+            PhaseCommand::Add { board, name, description } => store.add_phase_with_description(actor, &board, &name, &description)?,
+            PhaseCommand::Describe { board, phase, description, expected_version } => store.describe_phase(actor, &board, &phase, &description, expected_version)?,
+            PhaseCommand::Complete { board } => store.complete_phase(actor, &board)?,
+            PhaseCommand::Advance { board } => store.advance_phase(actor, &board)?,
+            PhaseCommand::Assign {
+                item,
+                phase,
+                expected_version,
+            } => store.assign_phase(actor, &item, &phase, expected_version)?,
+        },
+        PlanCommand::Cancel {
+            card,
+            reason,
+            expected_version,
+        } => store.cancel_card(actor, &card, &reason, expected_version)?,
+    })
+}
+
+fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::Result<Value> {
+    Ok(match command {
+        OrchCommand::Transfer {
+            card,
+            to_actor,
+            expected_version,
+        } => store.transfer_card(actor, &card, expected_version, &to_actor)?,
+        OrchCommand::ForceRelease {
+            card,
+            reason,
+            expected_version,
+        } => store.release_card(actor, &card, expected_version, Some(&reason))?,
+        OrchCommand::Session { command } => match command {
+            SessionCommand::Attach { card, runner, session_id } => store.attach_task_session(actor, &card, &runner, &session_id)?,
+            SessionCommand::Pause { card, waiting_question } => store.pause_task_session(actor, &card, waiting_question.as_deref())?,
+            SessionCommand::Resume { card } => store.resume_task_session(actor, &card)?,
+            SessionCommand::Ack { card, through_event_id } => store.acknowledge_task_session(actor, &card, through_event_id)?,
+            SessionCommand::Detach { card } => store.detach_task_session(actor, &card)?,
+            SessionCommand::Briefing { card, limit, after } => store.task_session_briefing(&card, limit, after)?,
+        },
+    })
+}
+
+fn run_admin(store: &Store, actor: &str, command: AdminCommand) -> workyard_core::Result<Value> {
+    Ok(match command {
+        AdminCommand::ArchiveBoard {
+            board,
+            expected_version,
+        } => store.set_board_archived(actor, &board, expected_version, true)?,
+        AdminCommand::UnarchiveBoard {
+            board,
+            expected_version,
+        } => store.set_board_archived(actor, &board, expected_version, false)?,
+        AdminCommand::ArchiveLane {
+            lane,
+            expected_version,
+        } => store.set_lane_archived(actor, &lane, expected_version, true)?,
+        AdminCommand::ScopeDependency {
+            dependency,
+            scope,
+            expected_version,
+        } => store.set_dependency_scope(actor, &dependency, &scope, expected_version)?,
+        AdminCommand::Answer {
             question,
             answer,
             note,
@@ -661,25 +725,11 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
             expected_version,
             false,
         )?,
-        Command::Drop {
+        AdminCommand::Drop {
             question,
             reason,
             expected_version,
         } => store.resolve_question(actor, &question, &reason, None, expected_version, true)?,
-        Command::Questions { board, open, kind } => store.list_questions_filtered(
-            board.as_deref(),
-            if open { Some("open") } else { None },
-            kind.as_deref(),
-        )?,
-        Command::Next { board, agent_type } => {
-            store.next_ready_task(&board, agent_type.as_deref())?
-        }
-        Command::History {
-            entity,
-            since,
-            limit,
-        } => store.view_history(&entity, since, limit)?,
-        Command::Events { since, limit } => store.poll_events(since, limit)?,
     })
 }
 

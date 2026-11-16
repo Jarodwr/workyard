@@ -15,7 +15,45 @@ CLI = ROOT / "target" / "debug" / "workyard"
 BOARD_NAME = "Workyard showcase"
 
 
+COMMAND_GROUPS = {
+    "claim": "task",
+    "release": "task",
+    "move": "task",
+    "progress": "task",
+    "note": "task",
+    "update": "task",
+    "add-card": "task",
+    "depend": "task",
+    "undepend": "task",
+    "ask": "task",
+    "question-options": "task",
+    "link-change": "task",
+    "update-change": "task",
+    "require-review": "task",
+    "create-project": "plan",
+    "create-board": "plan",
+    "attach-board": "plan",
+    "add-repository": "plan",
+    "add-document": "plan",
+    "add-stakeholder": "plan",
+    "assign-stakeholder": "plan",
+    "unassign-stakeholder": "plan",
+    "phase": "plan",
+    "cancel": "plan",
+    "transfer": "orch",
+    "force-release": "orch",
+    "session": "orch",
+    "archive-board": "admin",
+    "unarchive-board": "admin",
+    "archive-lane": "admin",
+    "scope-dependency": "admin",
+    "answer": "admin",
+    "drop": "admin"
+}
+
+
 def call(*args: str, actor: str = "demo") -> dict | list | None:
+    args = (COMMAND_GROUPS[args[0]], *args) if args[0] in COMMAND_GROUPS else args
     if not CLI.exists():
         raise SystemExit("Build the CLI first: cargo build -p workyard-cli")
     completed = subprocess.run(

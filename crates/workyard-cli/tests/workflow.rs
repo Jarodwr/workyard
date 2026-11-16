@@ -23,12 +23,12 @@ fn cli_json_workflow_uses_one_event_per_write() {
         assert_eq!(value["ok"], true);
         value["data"].clone()
     };
-    let board = call("cli", &["create-board", "CLI test"]);
+    let board = call("cli", &["plan", "create-board", "CLI test"]);
     let board_key = board["key"].as_str().unwrap();
     let card = call(
         "cli",
         &[
-            "add-card",
+            "task", "add-card",
             board_key,
             "First task",
             "--agent-type",
@@ -41,12 +41,12 @@ fn cli_json_workflow_uses_one_event_per_write() {
         call("cli", &["next", board_key, "--agent-type", "Engineering"])["key"],
         card["key"]
     );
-    let claimed = call("agent:one", &["claim", card_key, "--expected-version", "1"]);
+    let claimed = call("agent:one", &["task", "claim", card_key, "--expected-version", "1"]);
     let version = claimed["version"].as_i64().unwrap().to_string();
     let moved = call(
         "agent:one",
         &[
-            "move",
+            "task", "move",
             card_key,
             "In Progress",
             "--expected-version",
@@ -59,7 +59,7 @@ fn cli_json_workflow_uses_one_event_per_write() {
     let question = call(
         "agent:one",
         &[
-            "ask",
+            "task", "ask",
             board_key,
             "Which renderer?",
             "--kind",
@@ -81,7 +81,7 @@ fn cli_json_workflow_uses_one_event_per_write() {
     let answered = call(
         "cli",
         &[
-            "answer",
+            "admin", "answer",
             question["key"].as_str().unwrap(),
             "SVG",
             "--note",
@@ -113,17 +113,17 @@ fn cli_phases_and_cancellation_control_next_work() {
         assert!(output.status.success(), "{value}");
         value["data"].clone()
     };
-    let board = call(&["create-board", "Phases"]);
+    let board = call(&["plan", "create-board", "Phases"]);
     let key = board["key"].as_str().unwrap();
-    call(&["phase", "add", key, "Integration"]);
-    let current = call(&["add-card", key, "Current"]);
-    let future = call(&["add-card", key, "Later", "--phase", "Integration"]);
+    call(&["plan", "phase", "add", key, "Integration"]);
+    let current = call(&["task", "add-card", key, "Current"]);
+    let future = call(&["task", "add-card", key, "Later", "--phase", "Integration"]);
     let filtered = call(&["board", key, "--phase", "Integration"]);
     assert_eq!(filtered["lanes"][0]["cards"].as_array().unwrap().len(), 1);
     assert_eq!(filtered["lanes"][0]["cards"][0]["key"], future["key"]);
     assert_eq!(call(&["next", key])["key"], current["key"]);
     call(&[
-        "cancel",
+        "plan", "cancel",
         current["key"].as_str().unwrap(),
         "--reason",
         "Superseded",
@@ -131,8 +131,8 @@ fn cli_phases_and_cancellation_control_next_work() {
         "1",
     ]);
     assert_eq!(call(&["next", key])["key"], future["key"]);
-    call(&["phase", "advance", key]);
-    assert_eq!(call(&["phase", "list", key])[1]["status"], "current");
+    call(&["plan", "phase", "advance", key]);
+    assert_eq!(call(&["plan", "phase", "list", key])[1]["status"], "current");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -155,22 +155,22 @@ fn cli_session_commands_select_paused_work_before_backlog() {
         assert!(output.status.success(), "{value}");
         value["data"].clone()
     };
-    let board = call(&["create-board", "Sessions"]);
+    let board = call(&["plan", "create-board", "Sessions"]);
     let board_key = board["key"].as_str().unwrap();
-    let backlog = call(&["add-card", board_key, "Next task"]);
-    let task = call(&["add-card", board_key, "Paused task"]);
+    let backlog = call(&["task", "add-card", board_key, "Next task"]);
+    let task = call(&["task", "add-card", board_key, "Paused task"]);
     let key = task["key"].as_str().unwrap();
-    let claimed = call(&["claim", key, "--expected-version", "1"]);
+    let claimed = call(&["task", "claim", key, "--expected-version", "1"]);
     let version = claimed["version"].as_i64().unwrap().to_string();
-    call(&["move", key, "In Progress", "--expected-version", &version]);
-    call(&["session", "attach", key, "--runner", "codex", "--session-id", "cli-session"]);
-    call(&["session", "pause", key]);
+    call(&["task", "move", key, "In Progress", "--expected-version", &version]);
+    call(&["orch", "session", "attach", key, "--runner", "codex", "--session-id", "cli-session"]);
+    call(&["orch", "session", "pause", key]);
     assert_eq!(call(&["next", board_key])["dispatch_action"], "resume");
     assert_eq!(call(&["next", board_key])["key"], task["key"]);
-    let briefing = call(&["session", "briefing", key]);
+    let briefing = call(&["orch", "session", "briefing", key]);
     let cursor = briefing["cursor"].as_i64().unwrap().to_string();
-    call(&["session", "resume", key]);
-    call(&["session", "ack", key, "--through-event-id", &cursor]);
+    call(&["orch", "session", "resume", key]);
+    call(&["orch", "session", "ack", key, "--through-event-id", &cursor]);
     assert_eq!(call(&["next", board_key])["key"], backlog["key"]);
     std::fs::remove_dir_all(dir).unwrap();
 }

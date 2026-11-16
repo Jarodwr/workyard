@@ -1,0 +1,6 @@
+{
+  "name": "workyard",
+  "version": "0.1.0",
+  "description": "Work on Workyard board cards through the local workyard CLI.",
+  "author": { "name": "Workyard" }
+}

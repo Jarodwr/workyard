@@ -1,6 +1,6 @@
 # Orchestrator event contract
 
-Workyard records state changes but does not send messages to agents itself. A running orchestrator can use `workyard --json events --since <cursor>` or MCP `poll_events` to watch the ordered event stream. Store a separate cursor for each Workyard database.
+Workyard records state changes but does not send messages to agents itself. A running orchestrator can use `workyard --json events --since <cursor>` to watch the ordered event stream. Store a separate cursor for each Workyard database.
 
 ## Task sessions and work selection
 
