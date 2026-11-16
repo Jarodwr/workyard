@@ -1,4 +1,4 @@
-import { Pause, Play, Waves } from "lucide-react";
+import { Hourglass, Pause, Play, Waves } from "lucide-react";
 import type { Orchestrator } from "@/api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -18,7 +18,8 @@ const stateLabel: Record<Orchestrator["desired_state"], string> = {
 /** Shows whether an orchestrator holds the board and lets a human pause or resume it. */
 export function OrchestratorBar({ board, orchestrator, onState }: Props) {
   if (!orchestrator) return null;
-  const { connected, desired_state: state } = orchestrator;
+  const { connected, desired_state: state, backing_off: backingOff } = orchestrator;
+  const until = orchestrator.backoff_until ? new Date(orchestrator.backoff_until) : null;
   return (
     <div className="mb-3 flex shrink-0 items-center gap-3 rounded-lg border bg-card px-3 py-1.5 text-xs" aria-label="Orchestrator">
       <span className={cn("size-2 shrink-0 rounded-full", connected ? "bg-emerald-500" : "bg-muted-foreground/40")} aria-hidden />
@@ -27,6 +28,11 @@ export function OrchestratorBar({ board, orchestrator, onState }: Props) {
           <>
             <span className="font-medium">Orchestrator</span>
             <span className="text-muted-foreground"> · {stateLabel[state]} · up to {orchestrator.pool_size} at once</span>
+            {backingOff && (
+              <span className="ml-2 inline-flex items-center gap-1 text-amber-700 dark:text-amber-300" title={orchestrator.backoff_reason}>
+                <Hourglass className="size-3" /> Waiting until {until?.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {orchestrator.backoff_reason}
+              </span>
+            )}
           </>
         ) : (
           <span className="text-muted-foreground">

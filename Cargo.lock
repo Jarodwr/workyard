@@ -4552,6 +4552,7 @@ dependencies = [
 name = "workyard-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde_json",
  "uuid",
  "workyard-core",

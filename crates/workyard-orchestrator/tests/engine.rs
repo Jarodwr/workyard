@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use workyard_core::Store;
-use workyard_orchestrator::{Launch, Options, Orchestrator, Runner, Worker, WorkerState, hostname};
+use workyard_orchestrator::{LimitHit, Launch, Options, Orchestrator, Runner, Worker, WorkerState, hostname};
 
 struct TempDir(PathBuf);
 impl Drop for TempDir {
@@ -22,12 +22,14 @@ struct FakeRunner {
     running: Arc<AtomicUsize>,
     max_running: Arc<AtomicUsize>,
     launches: Arc<Mutex<Vec<(String, bool, String)>>>,
+    /// Reported (once) by the next worker to exit, as if it had run into a usage limit.
+    limit_next: Arc<Mutex<Option<LimitHit>>>,
 }
-struct FakeWorker(Arc<AtomicBool>);
+struct FakeWorker(Arc<AtomicBool>, Arc<Mutex<Option<LimitHit>>>);
 impl Worker for FakeWorker {
     fn poll(&mut self) -> WorkerState {
         if self.0.load(Ordering::SeqCst) {
-            WorkerState::Exited { success: true }
+            WorkerState::Exited { success: true, limit: self.1.lock().unwrap().take() }
         } else {
             WorkerState::Running
         }
@@ -63,7 +65,7 @@ impl Runner for FakeRunner {
             running.fetch_sub(1, Ordering::SeqCst);
             flag.store(true, Ordering::SeqCst);
         });
-        Ok(Box::new(FakeWorker(done)))
+        Ok(Box::new(FakeWorker(done, Arc::clone(&self.limit_next))))
     }
 }
 
@@ -76,6 +78,7 @@ struct Harness {
     running: Arc<AtomicUsize>,
     max_running: Arc<AtomicUsize>,
     launches: Arc<Mutex<Vec<(String, bool, String)>>>,
+    limit_next: Arc<Mutex<Option<LimitHit>>>,
 }
 
 impl Harness {
@@ -97,6 +100,7 @@ impl Harness {
             running: Arc::new(AtomicUsize::new(0)),
             max_running: Arc::new(AtomicUsize::new(0)),
             launches: Arc::new(Mutex::new(Vec::new())),
+            limit_next: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -113,23 +117,35 @@ impl Harness {
         max_failures: u32,
         behavior: impl Fn(&Launch, &Store) + Send + Sync + 'static,
     ) -> std::thread::JoinHandle<workyard_core::Result<()>> {
+        self.start_with(
+            Options {
+                holder: "test".into(),
+                pool: Some(pool),
+                max_failures,
+                idle_wait: Duration::from_millis(40),
+                limit_margin: Duration::ZERO,
+                ..Options::default()
+            },
+            behavior,
+        )
+    }
+
+    fn start_with(
+        &self,
+        options: Options,
+        behavior: impl Fn(&Launch, &Store) + Send + Sync + 'static,
+    ) -> std::thread::JoinHandle<workyard_core::Result<()>> {
         let runner = FakeRunner {
             db: self.db.clone(),
             behavior: Arc::new(behavior),
             running: Arc::clone(&self.running),
             max_running: Arc::clone(&self.max_running),
             launches: Arc::clone(&self.launches),
+            limit_next: Arc::clone(&self.limit_next),
         };
         let (db, board, stop) = (self.db.clone(), self.board.clone(), Arc::clone(&self.stop));
         std::thread::spawn(move || {
             let store = Store::new(db);
-            let options = Options {
-                holder: "test".into(),
-                pool: Some(pool),
-                max_failures,
-                idle_wait: Duration::from_millis(40),
-                ..Options::default()
-            };
             Orchestrator::new(&store, &board, Box::new(runner), options).run(&stop)
         })
     }
@@ -300,4 +316,89 @@ fn a_paused_worker_resumes_with_the_answer_in_its_briefing() {
     assert_eq!(launches[1].0, key);
     assert!(launches[1].1, "second launch resumes the session");
     assert!(launches[1].2.contains("question_answered"), "answer delivered in the briefing");
+}
+
+#[test]
+fn a_usage_limit_backs_the_board_off_without_failing_the_card() {
+    let h = Harness::new();
+    let key = h.card("Interrupted");
+    let reset = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 2;
+    *h.limit_next.lock().unwrap() = Some(LimitHit { resets_at: Some(reset), kind: "five_hour".into() });
+    // First run is cut off at once by the limit; the resumed run finishes the card.
+    let handle = h.start(1, 3, |launch, store| {
+        if launch.resume {
+            finish_card(launch, store);
+        }
+    });
+    h.wait("board backing off", |s| s.orchestrator_status(&h.board).unwrap()["backing_off"] == true);
+    let status = h.store.orchestrator_status(&h.board).unwrap();
+    assert!(status["backoff_reason"].as_str().unwrap().contains("five_hour"), "{status}");
+    assert_eq!(h.launches.lock().unwrap().len(), 1);
+
+    // Nothing starts while backing off, even though the card is waiting for resume.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(h.launches.lock().unwrap().len(), 1, "dispatched during backoff");
+
+    h.wait("card done after the reset", |s| h.done_count(s) == 1);
+    h.finish(handle);
+    let launches = h.launches.lock().unwrap();
+    assert_eq!(launches.len(), 2);
+    assert!(launches[1].1, "the interrupted session is resumed, not restarted");
+    let types = h.event_types();
+    assert!(!types.contains(&"task_session_detached".to_owned()), "limit counted as a failure");
+    let notes = h.store.view_card(&key).unwrap()["notes"].clone();
+    assert!(notes.as_array().unwrap().is_empty(), "failure note added: {notes}");
+}
+
+#[test]
+fn a_limit_without_a_reset_time_uses_the_fallback_backoff() {
+    let h = Harness::new();
+    h.card("Throttled");
+    *h.limit_next.lock().unwrap() = Some(LimitHit { resets_at: None, kind: "api_429".into() });
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            idle_wait: Duration::from_millis(40),
+            limit_fallback: Duration::from_secs(3600),
+            ..Options::default()
+        },
+        |_, _| {},
+    );
+    h.wait("board backing off", |s| s.orchestrator_status(&h.board).unwrap()["backing_off"] == true);
+    let until = h.store.orchestrator_status(&h.board).unwrap()["backoff_until"].as_str().unwrap().to_owned();
+    let until = chrono::DateTime::parse_from_rfc3339(&until).unwrap();
+    assert!(until > chrono::Utc::now() + chrono::Duration::minutes(55), "{until}");
+    h.finish(handle);
+}
+
+#[test]
+fn repeated_instant_failures_stop_dispatch_instead_of_walking_the_backlog() {
+    let h = Harness::new();
+    for i in 0..5 {
+        h.card(&format!("Card {i}"));
+    }
+    // Every worker dies immediately; the per-card limit is set high so only the guard acts.
+    let handle = h.start_with(
+        Options {
+            holder: "test".into(),
+            pool: Some(1),
+            max_failures: 10,
+            idle_wait: Duration::from_millis(40),
+            max_fast_failures: 3,
+            ..Options::default()
+        },
+        |_, _| {},
+    );
+    h.wait("board backing off", |s| s.orchestrator_status(&h.board).unwrap()["backing_off"] == true);
+    let status = h.store.orchestrator_status(&h.board).unwrap();
+    assert!(status["backoff_reason"].as_str().unwrap().contains("exited within"), "{status}");
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(h.launches.lock().unwrap().len(), 3, "kept launching after the guard tripped");
+    assert!(!h.event_types().contains(&"task_session_detached".to_owned()));
+    h.finish(handle);
 }

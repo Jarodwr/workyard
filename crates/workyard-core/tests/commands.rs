@@ -337,7 +337,7 @@ fn v7_database_gets_phases_and_preserves_existing_work() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
 }
 
@@ -799,7 +799,7 @@ fn existing_v1_database_migrates_to_agent_types_and_notes() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 }
 
 #[test]
@@ -1763,4 +1763,47 @@ fn silent_owner_of_active_work_is_stale_unless_paused_or_orchestrated() {
     assert_eq!(store.view_card(key).unwrap()["stale"], false);
     let events = store.poll_events(0, 1000).unwrap().to_string();
     assert!(!events.contains("\"stale\""));
+}
+
+#[test]
+fn backoff_stops_dispatch_until_it_expires_or_is_cleared_and_never_shortens() {
+    let (_dir, store, board) = setup();
+    store.create_card("cli", &board, "Task", "", "P2", None).unwrap();
+    let lease = store.orchestrator_acquire(&board, "run", "h", None, 30, None).unwrap();
+    let actor = lease["actor"].as_str().unwrap().to_owned();
+    let dispatch = |worker: &str, session: &str| {
+        store.orchestrator_dispatch(&actor, &board, worker, "claude", session, None).unwrap()
+    };
+
+    let later = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+    let sooner = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+    let status = store.orchestrator_set_backoff(&actor, &board, Some(&later), "usage limit").unwrap();
+    assert_eq!(status["backing_off"], true);
+    let blocked = dispatch("agent:w1", "s-1");
+    assert_eq!(blocked["reason"], "backing_off");
+    assert_eq!(blocked["why"], "usage limit");
+    assert!(store.next_ready_task(&board, None).unwrap().is_object(), "work is still visible");
+
+    // A worker reporting an earlier reset cannot undo the longer backoff.
+    let kept = store.orchestrator_set_backoff(&actor, &board, Some(&sooner), "other").unwrap();
+    assert_eq!(kept["backoff_reason"], "usage limit");
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(kept["backoff_until"].as_str().unwrap()).unwrap(),
+        chrono::DateTime::parse_from_rfc3339(&later).unwrap()
+    );
+    assert!(store.orchestrator_set_backoff(&actor, &board, Some("tomorrow-ish"), "").is_err());
+
+    // Clearing resumes dispatch; so does simply passing the time.
+    store.orchestrator_set_backoff(&actor, &board, None, "").unwrap();
+    assert_eq!(dispatch("agent:w1", "s-1")["dispatch"], "claim");
+    let past = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+    let expired = store.orchestrator_set_backoff(&actor, &board, Some(&past), "old").unwrap();
+    assert_eq!(expired["backing_off"], false);
+
+    // A stale orchestrator cannot set one.
+    store.orchestrator_release(&actor, &board).unwrap();
+    assert_eq!(
+        store.orchestrator_set_backoff(&actor, &board, Some(&later), "x").unwrap_err().code,
+        "stale_epoch"
+    );
 }

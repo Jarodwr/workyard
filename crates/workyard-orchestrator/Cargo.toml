@@ -8,6 +8,10 @@ rust-version.workspace = true
 # orchestrator does is validated, versioned, evented, and epoch-fenced like any
 # other write.
 [dependencies]
+chrono.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 workyard-core = { path = "../workyard-core" }
+
+[dev-dependencies]
+chrono.workspace = true

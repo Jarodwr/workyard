@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use workyard_core::{DEFAULT_LEASE_SECONDS, Result, Store};
 
-use crate::runner::{Launch, Runner, Worker, WorkerState};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+
+use crate::runner::{LimitHit, Launch, Runner, Worker, WorkerState};
 
 pub struct Options {
     pub holder: String,
@@ -20,6 +22,15 @@ pub struct Options {
     pub max_failures: u32,
     /// Longest the loop sleeps when nothing commits (it also polls worker exit).
     pub idle_wait: Duration,
+    /// Added to a limit's reset time before dispatching again.
+    pub limit_margin: Duration,
+    /// Backoff when a limit gives no reset time.
+    pub limit_fallback: Duration,
+    /// A worker that fails within this long of starting counts as a fast failure.
+    pub fast_failure_window: Duration,
+    /// Consecutive fast failures (across all cards) that stop dispatch for a while.
+    pub max_fast_failures: u32,
+    pub fast_failure_backoff: Duration,
 }
 
 impl Default for Options {
@@ -30,6 +41,11 @@ impl Default for Options {
             lease_seconds: DEFAULT_LEASE_SECONDS,
             max_failures: 3,
             idle_wait: Duration::from_secs(1),
+            limit_margin: Duration::from_secs(5),
+            limit_fallback: Duration::from_secs(30 * 60),
+            fast_failure_window: Duration::from_secs(20),
+            max_fast_failures: 3,
+            fast_failure_backoff: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -49,8 +65,15 @@ pub struct Orchestrator<'a> {
     board: String,
     runner: Box<dyn Runner>,
     opts: Options,
-    live: HashMap<String, Box<dyn Worker>>,
+    live: HashMap<String, Live>,
     failures: HashMap<String, u32>,
+    fast_failures: u32,
+    limit_streak: u32,
+}
+
+struct Live {
+    worker: Box<dyn Worker>,
+    started: Instant,
 }
 
 impl<'a> Orchestrator<'a> {
@@ -62,6 +85,8 @@ impl<'a> Orchestrator<'a> {
             opts,
             live: HashMap::new(),
             failures: HashMap::new(),
+            fast_failures: 0,
+            limit_streak: 0,
         }
     }
 
@@ -119,12 +144,13 @@ impl<'a> Orchestrator<'a> {
     }
 
     /// Handle workers that exited. An exit with the session paused (waiting) or gone
-    /// (finished) is normal; anything else counts as a failure.
+    /// (finished) is normal; a usage limit backs the whole board off; anything else is a
+    /// failure of that card.
     fn reap(&mut self, actor: &str) {
         let mut exited = Vec::new();
-        for (key, worker) in self.live.iter_mut() {
-            if matches!(worker.poll(), WorkerState::Exited { .. }) {
-                exited.push(key.clone());
+        for (key, live) in self.live.iter_mut() {
+            if let WorkerState::Exited { limit, .. } = live.worker.poll() {
+                exited.push((key.clone(), live.started.elapsed(), limit));
             }
         }
         if exited.is_empty() {
@@ -134,22 +160,81 @@ impl<'a> Orchestrator<'a> {
             .store
             .list_task_sessions(&self.board)
             .unwrap_or_else(|_| json!([]));
-        for key in exited {
+        for (key, ran_for, limit) in exited {
             self.live.remove(&key);
             let session = sessions
                 .as_array()
                 .into_iter()
                 .flatten()
                 .find(|entry| entry["card_key"] == key.as_str());
-            match session {
-                Some(entry) if entry["session"]["paused_at"].is_null() => {
-                    self.worker_failed(actor, &key, "exited without finishing or pausing");
+            let unpaused = session.is_some_and(|entry| entry["session"]["paused_at"].is_null());
+            if let Some(limit) = limit {
+                // Not the card's fault: keep its session resumable and wait the limit out.
+                self.limit_hit(actor, &limit);
+                if unpaused {
+                    self.log_err(self.store.pause_task_session(actor, &key, None), &key);
                 }
-                _ => {
-                    self.failures.remove(&key);
+            } else if unpaused {
+                self.limit_streak = 0;
+                if ran_for < self.opts.fast_failure_window {
+                    self.fast_failure(actor);
+                } else {
+                    self.fast_failures = 0;
                 }
+                self.worker_failed(actor, &key, "exited without finishing or pausing");
+            } else {
+                self.limit_streak = 0;
+                self.fast_failures = 0;
+                self.failures.remove(&key);
             }
         }
+    }
+
+    /// Stop dispatching until the limit resets, using the reset time the runtime reported or,
+    /// failing that, a doubling fallback.
+    fn limit_hit(&mut self, actor: &str, limit: &LimitHit) {
+        let until = match limit.resets_at.and_then(|t| DateTime::from_timestamp(t, 0)) {
+            Some(reset) if reset > Utc::now() => {
+                self.limit_streak = 0;
+                reset + ChronoDuration::from_std(self.opts.limit_margin).unwrap_or_default()
+            }
+            _ => {
+                self.limit_streak += 1;
+                let factor = 1u32 << self.limit_streak.saturating_sub(1).min(3);
+                Utc::now()
+                    + ChronoDuration::from_std(self.opts.limit_fallback * factor).unwrap_or_default()
+            }
+        };
+        self.set_backoff(actor, until, &format!("Claude usage limit ({})", limit.kind));
+    }
+
+    /// Several workers in a row dying within seconds points at something broken (auth,
+    /// permissions, a bad flag), not at one card. Stop and let a human look rather than
+    /// walk the backlog failing every card.
+    fn fast_failure(&mut self, actor: &str) {
+        self.fast_failures += 1;
+        if self.fast_failures >= self.opts.max_fast_failures {
+            let n = self.fast_failures;
+            self.fast_failures = 0;
+            let until = Utc::now()
+                + ChronoDuration::from_std(self.opts.fast_failure_backoff).unwrap_or_default();
+            self.set_backoff(
+                actor,
+                until,
+                &format!(
+                    "{n} workers in a row exited within {}s without finishing; check the worker logs",
+                    self.opts.fast_failure_window.as_secs()
+                ),
+            );
+        }
+    }
+
+    fn set_backoff(&self, actor: &str, until: DateTime<Utc>, reason: &str) {
+        self.log_err(
+            self.store
+                .orchestrator_set_backoff(actor, &self.board, Some(&until.to_rfc3339()), reason),
+            &self.board,
+        );
     }
 
     /// Pause the session so it can be resumed, or after repeated failures detach it and
@@ -225,11 +310,18 @@ impl<'a> Orchestrator<'a> {
         };
         match self.runner.start(&launch) {
             Ok(worker) => {
-                self.live.insert(key.to_owned(), worker);
+                self.live.insert(
+                    key.to_owned(),
+                    Live {
+                        worker,
+                        started: Instant::now(),
+                    },
+                );
                 true
             }
             Err(error) => {
                 eprintln!("could not start worker for {key}: {error}");
+                self.fast_failure(actor);
                 self.worker_failed(actor, key, "could not be started");
                 false
             }
@@ -278,8 +370,8 @@ impl<'a> Orchestrator<'a> {
 
     fn shutdown(&mut self, actor: &str) {
         let keys: Vec<String> = self.live.keys().cloned().collect();
-        for (_, worker) in self.live.iter_mut() {
-            worker.stop();
+        for (_, live) in self.live.iter_mut() {
+            live.worker.stop();
         }
         self.live.clear();
         for key in keys {

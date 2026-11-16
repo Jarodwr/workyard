@@ -95,7 +95,7 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
     let key: String = db.query_row("SELECT key FROM boards WHERE id=?1", [board_id], |r| r.get(0))?;
     let row = db
         .query_row(
-            "SELECT desired_state,cursor,pool_size,holder,host,pid,epoch,heartbeat_at,lease_expires_at FROM orchestrator_sessions WHERE board_id=?1",
+            "SELECT desired_state,cursor,pool_size,holder,host,pid,epoch,heartbeat_at,lease_expires_at,backoff_until,backoff_reason FROM orchestrator_sessions WHERE board_id=?1",
             [board_id],
             |r| {
                 Ok(json!({
@@ -104,18 +104,24 @@ fn session_row(db: &Connection, board_id: &str) -> Result<Value> {
                     "host": r.get::<_, Option<String>>(4)?, "pid": r.get::<_, Option<i64>>(5)?,
                     "epoch": r.get::<_, i64>(6)?, "heartbeat_at": r.get::<_, Option<String>>(7)?,
                     "lease_expires_at": r.get::<_, Option<String>>(8)?,
+                    "backoff_until": r.get::<_, Option<String>>(9)?,
+                    "backoff_reason": r.get::<_, String>(10)?,
                 }))
             },
         )
         .optional()?
         .unwrap_or_else(|| {
-            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null})
+            json!({"desired_state":"running","cursor":0,"pool_size":1,"holder":null,"host":null,"pid":null,"epoch":0,"heartbeat_at":null,"lease_expires_at":null,"backoff_until":null,"backoff_reason":""})
         });
     let mut row = row;
     let epoch = row["epoch"].as_i64().unwrap_or(0);
     row["board_id"] = json!(board_id);
     row["board_key"] = json!(key);
     row["connected"] = json!(row["holder"].is_string() && lease_live(&row, ""));
+    row["backing_off"] = json!(row["backoff_until"]
+        .as_str()
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|t| t.with_timezone(&Utc) > Utc::now()));
     row["actor"] = if row["holder"].is_string() {
         json!(format!("orch:{key}#{epoch}"))
     } else {
@@ -271,6 +277,52 @@ impl Store {
         Ok(after)
     }
 
+    /// Stop dispatching until `until` (RFC 3339), recording why, or clear the backoff with
+    /// `None`. A later time replaces an earlier one; an earlier time never shortens a backoff
+    /// already in force, so two workers reporting different limits cannot undo each other.
+    pub fn orchestrator_set_backoff(
+        &self,
+        actor: &str,
+        board: &str,
+        until: Option<&str>,
+        reason: &str,
+    ) -> Result<Value> {
+        let epoch = epoch_of(actor)?;
+        let new_until = until
+            .map(|t| {
+                DateTime::parse_from_rfc3339(t)
+                    .map(|t| t.with_timezone(&Utc))
+                    .map_err(|_| Error::new("validation_error", "until must be an RFC 3339 time"))
+            })
+            .transpose()?;
+        let mut db = self.open()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let board_id = resolve_board(&tx, board)?;
+        check_epoch(&tx, &board_id, epoch)?;
+        let before = session_row(&tx, &board_id)?;
+        let current = before["backoff_until"]
+            .as_str()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc))
+            .filter(|t| *t > Utc::now());
+        let (stored, why) = match (new_until, current) {
+            (None, _) => (None, ""),
+            (Some(new), Some(old)) if old >= new => (Some(old), before["backoff_reason"].as_str().unwrap_or("")),
+            (Some(new), _) => (Some(new), reason),
+        };
+        if stored == current && why == before["backoff_reason"].as_str().unwrap_or("") {
+            return Ok(before);
+        }
+        tx.execute(
+            "UPDATE orchestrator_sessions SET backoff_until=?2,backoff_reason=?3,updated_at=?4 WHERE board_id=?1",
+            params![board_id, stored.map(|t| t.to_rfc3339()), why, now()],
+        )?;
+        let after = session_row(&tx, &board_id)?;
+        record(&tx, actor, "orchestrator_backoff_changed", &board_id, "orchestrator", &board_id, Some(&before), Some(&after), &[], why)?;
+        self.commit(tx)?;
+        Ok(after)
+    }
+
     pub fn orchestrator_set_pool(&self, actor: &str, board: &str, size: i64) -> Result<Value> {
         if !(1..=64).contains(&size) {
             return Err(Error::new("validation_error", "pool size must be 1–64"));
@@ -313,6 +365,9 @@ impl Store {
         check_epoch(&tx, &board_id, epoch)?;
         let session = session_row(&tx, &board_id)?;
         let idle = |reason: &str| json!({"dispatch":null,"reason":reason});
+        if session["backing_off"] == true {
+            return Ok(json!({"dispatch":null,"reason":"backing_off","until":session["backoff_until"],"why":session["backoff_reason"]}));
+        }
         if session["desired_state"] != "running" {
             return Ok(idle(session["desired_state"].as_str().unwrap_or("paused")));
         }

@@ -15,9 +15,19 @@ pub struct Launch {
     pub resume: bool,
 }
 
+/// A usage or rate limit the worker ran into, read from the runtime's structured output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitHit {
+    /// When the limit resets, as Unix seconds, if the runtime said.
+    pub resets_at: Option<i64>,
+    /// The runtime's name for the limit, for example `five_hour`.
+    pub kind: String,
+}
+
 pub enum WorkerState {
     Running,
-    Exited { success: bool },
+    /// `limit` is set when the worker stopped because of a limit rather than a fault.
+    Exited { success: bool, limit: Option<LimitHit> },
 }
 
 pub trait Worker: Send {

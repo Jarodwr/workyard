@@ -4,4 +4,4 @@ pub mod runner;
 
 pub use claude::ClaudeRunner;
 pub use engine::{Options, Orchestrator, hostname};
-pub use runner::{Launch, Runner, Worker, WorkerState};
+pub use runner::{LimitHit, Launch, Runner, Worker, WorkerState};

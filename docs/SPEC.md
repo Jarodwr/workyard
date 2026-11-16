@@ -89,7 +89,7 @@ The Rust core exposes typed `Card` and `Question` snapshots, distinct board/card
 | `projects`, `project_repositories`, `project_documents`, `project_stakeholders` | Added in migration 7. A board has an optional `project_id`; a question has an optional `stakeholder_id`. See [PROJECTS.md](PROJECTS.md) |
 | `card_changes` | Added in migration 7. Linked repository, working and target branch, `commit_oid`, `review_required`, `approved_commit_oid`, `reviewer`, `version`. A new commit clears approval |
 | `phases` | Added in migrations 8 and 9. Ordered per board with a unique name, description, `version`, and `closed_at`; `boards.current_phase_id` points at the current one; `cards` and `questions` carry `phase_id`. See ADR 0001 |
-| `orchestrator_sessions` | Added in migration 11. One row per board: `desired_state` (`running`, `paused`, `draining`), event `cursor`, `pool_size`, and the lease (`holder`, `host`, `pid`, `epoch`, `heartbeat_at`, `lease_expires_at`). See [ORCHESTRATOR.md](ORCHESTRATOR.md) |
+| `orchestrator_sessions` | Added in migrations 11 and 12. One row per board: `desired_state` (`running`, `paused`, `draining`), event `cursor`, `pool_size`, the lease (`holder`, `host`, `pid`, `epoch`, `heartbeat_at`, `lease_expires_at`), and `backoff_until`/`backoff_reason`. See [ORCHESTRATOR.md](ORCHESTRATOR.md) |
 | `dependencies.scope` | Added in migration 7: `start` (default) or `finish` |
 | `cards.cancelled_at`, `cancellation_reason`, `cancelled_by` | Added in migration 8. A terminal marker, not a lane. See ADR 0002 |
 
@@ -256,6 +256,7 @@ workyard orch run <B-1> [--pool N] [--cwd REPO]  # foreground orchestrator; one 
 workyard orch status <B-1>                       # state, cursor, pool, lease
 workyard orch pause|resume|drain <B-1>           # desired state; pause only stops new dispatches
 workyard orch pool <B-1> <n>
+workyard --actor orch:<B-1>#<epoch> orch backoff <B-1> [--until RFC3339] [--reason TEXT]   # stop dispatching until a time; omit --until to clear
 workyard orch acquire <B-1> [--holder H] [--pid N] [--lease S] [--pool N]   # prints actor orch:<board>#<epoch>
 workyard --actor orch:<B-1>#<epoch> orch heartbeat|release|cursor|dispatch <B-1> ...
 workyard events --since N --follow               # one JSON line per event, wakes on commit

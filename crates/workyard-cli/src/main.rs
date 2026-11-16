@@ -331,6 +331,15 @@ enum OrchCommand {
     Drain { board: String },
     /// Set how many workers may run at once.
     Pool { board: String, size: i64 },
+    /// Stop dispatching until a time (use the orchestrator actor); omit --until to clear.
+    Backoff {
+        board: String,
+        /// RFC 3339 time, for example 2026-11-16T14:20:00+00:00
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
     /// Take the board's lease. Fails with orchestrator_conflict while another holds it.
     /// Prints the actor (orch:<board>#<epoch>) to use for every later orchestrator command.
     Acquire {
@@ -756,6 +765,9 @@ fn run_orch(store: &Store, actor: &str, command: OrchCommand) -> workyard_core::
         OrchCommand::Pause { board } => store.orchestrator_set_state(actor, &board, "paused")?,
         OrchCommand::Resume { board } => store.orchestrator_set_state(actor, &board, "running")?,
         OrchCommand::Drain { board } => store.orchestrator_set_state(actor, &board, "draining")?,
+        OrchCommand::Backoff { board, until, reason } => {
+            store.orchestrator_set_backoff(actor, &board, until.as_deref(), &reason)?
+        }
         OrchCommand::Pool { board, size } => store.orchestrator_set_pool(actor, &board, size)?,
         OrchCommand::Acquire {
             board,

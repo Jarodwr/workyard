@@ -47,7 +47,7 @@ export type EventPage = { events: BoardEvent[]; cursor: number; has_more: boolea
 export type Question = { id: string; key: string; board_id: string; phase_id: string; stakeholder_id?: string | null; stakeholder?: { name: string; role: string; contact: string }; kind: "engineering" | "business"; title: string; body: string; options: string[]; recommended_option: string; recommendation_reason: string; status: string; answer: string; answer_note: string; version: number; blocks: string[] };
 export type Dependency = { id: string; from_card_id: string; to_card_id: string | null; to_question_id: string | null; scope?: "start" | "finish" };
 export type CardChange = { id: string; version: number; repository_id: string; working_branch: string; target_branch: string; commit_oid: string; review_required: boolean; approved_commit_oid: string | null; reviewer: string | null };
-export type Orchestrator = { board_key: string; desired_state: "running" | "paused" | "draining"; pool_size: number; connected: boolean; holder: string | null; epoch: number; heartbeat_at: string | null };
+export type Orchestrator = { board_key: string; desired_state: "running" | "paused" | "draining"; pool_size: number; connected: boolean; holder: string | null; epoch: number; heartbeat_at: string | null; backing_off: boolean; backoff_until: string | null; backoff_reason: string };
 export type CardNote = { id: string; card_id: string; actor: string; body: string; created_at: string };
 export type TaskSession = { id: string; card_id: string; owner_actor: string; runner: string; external_session_id: string; attached_at: string; paused_at: string | null; waiting_question_id: string | null; waiting_question_key: string | null; last_delivered_event_id: number; detached_at: string | null };
 export type CardDetail = Card & { dependencies: Dependency[]; changes: CardChange[]; notes: CardNote[]; session: TaskSession | null; events: { id: number; type: string; actor: string; ts: string }[] };
@@ -110,7 +110,7 @@ let demoQuestions: Question[] = [
 ];
 let demoDependencies: Dependency[] = [{id:"demo-dep-1",from_card_id:"demo-2",to_card_id:"demo-1",to_question_id:null,scope:"finish"}];
 let demoNotes: CardNote[] = [];
-let demoOrchestrator: Orchestrator = { board_key: "B-1", desired_state: "running", pool_size: 2, connected: true, holder: "cli:demo", epoch: 1, heartbeat_at: null };
+let demoOrchestrator: Orchestrator = { board_key: "B-1", desired_state: "running", pool_size: 2, connected: true, holder: "cli:demo", epoch: 1, heartbeat_at: null, backing_off: false, backoff_until: null, backoff_reason: "" };
 const clone = <T,>(value: T): T => structuredClone(value);
 function demoFindCard(id: string): Card {
   const card = demoBoard.lanes.flatMap((lane) => lane.cards).find((c) => c.id === id || c.key === id);
