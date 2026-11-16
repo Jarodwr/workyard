@@ -1660,16 +1660,23 @@ impl Store {
     }
 }
 
+/// Newest schema this binary can open; keep in step with the last migration below.
+const SCHEMA_VERSION: i64 = 15;
+
 fn migrate(db: &mut Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 15 {
+    if version == SCHEMA_VERSION {
         return Ok(());
     }
-    if version > 15 {
+    if version > SCHEMA_VERSION {
         return Err(Error::new(
             "schema_too_new",
-            "database was created by a newer Workyard version",
-        ));
+            format!(
+                "database schema is version {version} but this Workyard binary only supports up to version {SCHEMA_VERSION}; the binary is older than the database"
+            ),
+        )
+        .hint("Rebuild or reinstall the workyard CLI from a current checkout, or point WORKYARD_DB at a database this binary created")
+        .details(json!({"binary_schema_version": SCHEMA_VERSION, "database_schema_version": version, "older": "binary"})));
     }
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
