@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 mod actor_policy;
 mod orchestrator;
+mod permissions;
 pub use orchestrator::DEFAULT_LEASE_SECONDS;
 mod phases;
 mod projects;
@@ -1668,7 +1669,7 @@ impl Store {
 }
 
 /// Newest schema this binary can open; keep in step with the last migration below.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 fn migrate(db: &mut Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -1841,6 +1842,15 @@ fn migrate(db: &mut Connection) -> Result<()> {
             [now()],
         )?;
         tx.execute_batch("PRAGMA user_version = 15")?;
+        version = 15;
+    }
+    if version == 15 {
+        tx.execute_batch(include_str!("../migrations/016.sql"))?;
+        tx.execute(
+            "INSERT INTO schema_version(version,applied_at) VALUES (16,?1)",
+            [now()],
+        )?;
+        tx.execute_batch("PRAGMA user_version = 16")?;
     }
     tx.commit()?;
     Ok(())
