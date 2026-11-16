@@ -229,7 +229,7 @@ export function DependencyView({
                         )}
                         {node.chokepoint && <Badge variant="outline" className={cn(agent ? "" : "ml-auto", "border-violet-500/30 bg-violet-500/10 px-1 py-0 text-[9px] text-violet-700 dark:text-violet-300")}><GitFork className="size-3" />Holds {node.impact}</Badge>}
                       </span>
-                      <strong className="mt-1 line-clamp-2 w-full text-xs leading-4">{node.title}</strong>
+                      <strong className={cn("mt-1 line-clamp-2 w-full text-xs leading-4", node.cancelled && "line-through")}>{node.title}</strong>
                       {card && (
                         <span className="mt-auto flex w-full items-center gap-1.5" aria-label={`${progressDisplay(card).value}% ${progressDisplay(card).estimated ? "estimated" : "complete"}`} title={progressDisplay(card).estimated ? "Estimated" : undefined}>
                           <Progress value={progressDisplay(card).value} estimated={progressDisplay(card).estimated} className="h-1 flex-1" />

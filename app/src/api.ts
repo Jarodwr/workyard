@@ -40,6 +40,7 @@ export type Card = {
   ready: boolean;
   blockers: Blocker[];
   finish_blockers?: Blocker[];
+  cancelled_prerequisites?: Blocker[];
   review_gates?: { change_id: string; working_branch: string; commit_oid: string; approved: boolean; reviewer: string | null }[];
   can_finish?: boolean;
   open_question_count: number;
@@ -52,6 +53,7 @@ export type Lane = { id: string; name: string; kind: string; position: number; v
 export type Phase = { id: string; board_id: string; name: string; description: string; version: number; closed_at: string | null; position: number; status: "closed" | "current" | "future" };
 export type Board = { id: string; key: string; name: string; description: string; version: number; archived: boolean; review_required?: boolean; integration?: "merge" | "rebase"; project_id?: string | null; current_phase_id?: string | null; phases: Phase[]; lanes: Lane[] };
 export type ProjectListItem = { id: string; name: string; description: string; version: number; board_count: number };
+export type RepositoryInfo = { path: string; branch: string; dirty: boolean };
 export type Project = ProjectListItem & {
   boards: { id: string; key: string; name: string; description: string; archived: boolean }[];
   repositories: { id: string; path: string; target_branch: string; remote_url: string | null }[];
@@ -93,6 +95,10 @@ export const api = {
   unassignQuestionStakeholder: (question: Question) => invoke<Question>("unassign_question_stakeholder", { question: question.key, expectedVersion: question.version }),
   openInTerminal: (card: string) => invoke<TaskSession>("open_in_terminal", { card }),
   openPlanner: (board: string) => invoke<{ board: string }>("open_planner", { board }),
+  openProjectPlanner: (project: string) => invoke<{ project: string }>("open_project_planner", { project }),
+  inspectRepository: (path: string) => invoke<RepositoryInfo>("inspect_repository", { path }),
+  pickFolder: () => invoke<string | null>("pick_folder"),
+  createProjectFromRepository: (name: string, description: string, path: string, targetBranch: string) => invoke<Project>("create_project_from_repository", { name, description, path, targetBranch }),
   startOrchestrator: (board: string) => invoke<Orchestrator>("start_orchestrator", { board, supervisor: getSupervisorPreference(board) }),
   stopOrchestrator: (board: string) => invoke<Orchestrator>("stop_orchestrator", { board }),
   releaseSessionHold: (card: string) => invoke<TaskSession>("release_session_hold", { card }),
@@ -170,6 +176,10 @@ export function setSupervisorPreference(board: string, on: boolean) {
 }
 const demoApi = {
   openInTerminal: async (_card: string): Promise<TaskSession> => { throw new Error("Opening a terminal needs the desktop app"); },
+  openProjectPlanner: async (_project: string): Promise<{ project: string }> => { throw new Error("Opening a planner needs the desktop app"); },
+  inspectRepository: async (_path: string): Promise<RepositoryInfo> => { throw new Error("Creating a project needs the desktop app"); },
+  pickFolder: async (): Promise<string | null> => null,
+  createProjectFromRepository: async (_name: string, _description: string, _path: string, _branch: string): Promise<Project> => { throw new Error("Creating a project needs the desktop app"); },
   openPlanner: async (_board: string): Promise<{ board: string }> => { throw new Error("Opening a planner needs the desktop app"); },
   startOrchestrator: async (_board: string): Promise<Orchestrator> => { throw new Error("Starting an orchestrator needs the desktop app"); },
   stopOrchestrator: async (_board: string): Promise<Orchestrator> => { throw new Error("Stopping an orchestrator needs the desktop app"); },

@@ -109,7 +109,8 @@ Migration 6 ensures existing questions have exactly one canonical `Other` choice
 
 ### Derived state
 
-- A card is **blocked** if any dependency targets a card outside a `done` lane or an `open` question.
+- A card is **blocked** if any dependency targets a card outside a `done` lane that is not cancelled or an `open` question.
+- A **cancelled** prerequisite never finishes, so it blocks neither start nor finish scope. Cancelling it recomputes its dependents in the cancelling transaction and emits the usual `card_became_ready` / `card_unblocked` and `card_can_finish` effects, plus `prerequisite_cancelled`, so owners and the orchestrator notice. The link stays: the card snapshot lists it under `cancelled_prerequisites` (not in `blockers`), card detail shows it struck through, and the graph greys and strikes the node. A cancelled card is terminal and cannot be reopened, so the link never re-blocks; if a way to reopen is ever added, recomputation re-blocks it. A cancelled prerequisite no longer holds a phase open, and `blocking_impact` ignores it. Adding a new dependency on cancelled work is still rejected.
 - A card is **ready** if it is not blocked and is outside a `done` lane.
 - **Blockers** are the unresolved target IDs and titles. Blocked state is computed on reads and never stored on cards.
 - An active card can become blocked when an existing prerequisite moves out of `done`. It stays in its lane and gains a blocked badge.

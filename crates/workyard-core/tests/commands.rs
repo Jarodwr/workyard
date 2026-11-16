@@ -597,65 +597,32 @@ fn next_phase_work_starts_only_when_current_queue_is_exhausted() {
 }
 
 #[test]
-fn cancelled_prerequisite_requires_replanning_before_phase_advance() {
+fn cancelled_prerequisite_stops_blocking_and_stays_visible() {
     let (_dir, store, board) = setup();
     store.add_phase("agent", &board, "Next").unwrap();
     let obsolete = store
         .create_card("agent", &board, "Obsolete", "", "P2", None)
         .unwrap();
     let later = store
-        .create_card_in_phase(
-            "agent",
-            &board,
-            "Dependent",
-            "",
-            "P2",
-            None,
-            "",
-            Some("Next"),
-        )
+        .create_card_in_phase("agent", &board, "Dependent", "", "P2", None, "", Some("Next"))
         .unwrap();
-    store
-        .add_dependency(
-            "agent",
-            later["key"].as_str().unwrap(),
-            obsolete["key"].as_str().unwrap(),
-            1,
-        )
-        .unwrap();
+    let (obs, dep) = (obsolete["key"].as_str().unwrap(), later["key"].as_str().unwrap());
+    store.add_dependency("agent", dep, obs, 1).unwrap();
+    assert_eq!(store.view_card(dep).unwrap()["blocked"], true);
     let before_cancel = store.latest_event_id().unwrap();
-    let cancelled = store
-        .cancel_card(
-            "agent",
-            obsolete["key"].as_str().unwrap(),
-            "No longer needed",
-            1,
-        )
-        .unwrap();
+    let cancelled = store.cancel_card("agent", obs, "No longer needed", 1).unwrap();
     assert_eq!(store.latest_event_id().unwrap(), before_cancel + 1);
     assert_eq!(cancelled["cancellation_reason"], "No longer needed");
-    let before_failed_advance = store.latest_event_id().unwrap();
-    assert_eq!(
-        store.advance_phase("agent", &board).unwrap_err().code,
-        "phase_incomplete"
-    );
-    assert_eq!(store.latest_event_id().unwrap(), before_failed_advance);
-    assert_eq!(
-        store.view_card(later["key"].as_str().unwrap()).unwrap()["blocked"],
-        true
-    );
-    assert_eq!(
-        store.view_card(later["key"].as_str().unwrap()).unwrap()["blockers"][0]["cancelled"],
-        true
-    );
-    store
-        .remove_dependency(
-            "agent",
-            later["key"].as_str().unwrap(),
-            obsolete["key"].as_str().unwrap(),
-            2,
-        )
-        .unwrap();
+    let event = store.poll_events(before_cancel, 10).unwrap();
+    let effects = event["events"][0]["effects"].as_array().unwrap();
+    assert!(effects.iter().any(|e| e["type"] == "card_became_ready" && e["card_key"] == dep));
+    let view = store.view_card(dep).unwrap();
+    assert_eq!(view["blocked"], false);
+    assert_eq!(view["can_finish"], true);
+    assert_eq!(view["blockers"].as_array().unwrap().len(), 0);
+    assert_eq!(view["cancelled_prerequisites"][0]["key"], obs);
+    assert_eq!(view["cancelled_prerequisites"][0]["cancelled"], true);
+    // The phase can close without repairing the link.
     let board_after = store.advance_phase("agent", &board).unwrap();
     assert_eq!(
         board_after["current_phase_id"],
