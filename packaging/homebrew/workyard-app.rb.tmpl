@@ -1,0 +1,25 @@
+cask "workyard" do
+  version "@VERSION@"
+  @DMG_SHA256@
+
+  url "@HOMEPAGE@/releases/download/v#{version}/Workyard-#{version}-#{Hardware::CPU.arch == :arm64 ? "aarch64" : "x86_64"}.dmg"
+  name "Workyard"
+  desc "Local-first kanban for coordinating AI coding agents"
+  homepage "@HOMEPAGE@"
+
+  depends_on macos: ">= :ventura"
+
+  app "Workyard.app"
+  # The app bundles the same CLI as the `workyard` formula; use one or the other.
+  binary "#{appdir}/Workyard.app/Contents/MacOS/workyard"
+
+  zap trash: [
+    "~/Library/Application Support/dev.workyard.app",
+    "~/Library/Caches/dev.workyard.app",
+    "~/Library/Preferences/dev.workyard.app.plist",
+    "~/Library/Saved Application State/dev.workyard.app.savedState",
+    "~/Library/WebKit/dev.workyard.app",
+  ]
+
+@UNSIGNED_NOTE@
+end

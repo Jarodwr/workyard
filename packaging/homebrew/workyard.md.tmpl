@@ -1,0 +1,40 @@
+# workyard: how this build is packaged
+
+`Formula/workyard.rb` builds the `workyard` CLI from the
+[Workyard source](@HOMEPAGE@) (@LICENSE@ licence) and installs the Claude Code
+plugin next to it. `Casks/workyard.rb` installs the desktop app from the
+release dmg instead. Keep this file up to date whenever either changes.
+
+## Pins
+
+| What | Pinned to | Where |
+|---|---|---|
+| Workyard | `v@VERSION@` | `url` / `sha256` (`version` is read from the tag) |
+
+`brew install --HEAD jarodwr/tap/workyard` builds the `main` branch instead.
+
+## What the formula does
+
+- `cargo install --locked` of `crates/workyard-cli`, the only binary needed.
+- Installs the plugin directory to `share/workyard/plugin`. The CLI looks for
+  it at `<exe dir>/../share/workyard/plugin` after resolving the `bin/workyard`
+  symlink, so `workyard doctor` reports the plugin as found.
+- `caveats` print the `claude plugin marketplace add` steps and `workyard doctor`.
+- `test` checks `workyard --version` and `workyard doctor --json`. `doctor`
+  exits 1 when `claude` or `git` is missing, so the test accepts 0 or 1 and
+  checks the reported version and the installed plugin manifest instead.
+
+## The cask
+
+`brew install --cask jarodwr/tap/workyard` installs `Workyard.app` and links the
+bundled CLI as `workyard`. It conflicts in practice with the formula (same
+binary name); install one of them.
+
+@CASK_NOTE@
+
+## Updating
+
+1. Tag and release in the Workyard repository (`docs/RELEASING.md` there).
+2. `scripts/render-homebrew.sh <version> <source-sha256> [<dmg-sha256>]`
+   regenerates the formula, cask and this page.
+3. Open a PR in the tap so test-bot builds the bottle, then run **brew pr-pull**.
