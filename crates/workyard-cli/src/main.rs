@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+mod doctor;
 mod watch;
 
 use clap::{Parser, Subcommand};
@@ -11,7 +12,7 @@ use workyard_core::{BoardFilter, DEFAULT_LEASE_SECONDS, Error, Store};
 use workyard_orchestrator::{ClaudeRunner, MacNotifier, Options, Orchestrator, Silent, hostname};
 
 #[derive(Parser)]
-#[command(name = "workyard", about = "Local kanban for work with AI agents")]
+#[command(name = "workyard", version, about = "Local kanban for work with AI agents")]
 struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
@@ -29,6 +30,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Check this installation: version, database, claude and git, the plugin, the orchestrator.
+    /// Exits 1 when a check FAILs.
+    Doctor,
     /// Work on a card: claim, report progress, ask questions, link code changes.
     Task {
         #[command(subcommand)]
@@ -678,6 +682,7 @@ fn run(store: &Store, actor: &str, command: Command) -> workyard_core::Result<Va
         Command::Plan { command } => run_plan(store, actor, command)?,
         Command::Orch { command } => run_orch(store, actor, command)?,
         Command::Admin { command } => run_admin(store, actor, command)?,
+        Command::Doctor => unreachable!("handled in main"),
         Command::Boards => store.list_boards()?,
         Command::Board {
             board,
@@ -1170,19 +1175,35 @@ fn permission_args(permissions: Permissions, allow: &[String]) -> Vec<String> {
     }
 }
 
-/// Where the Workyard plugin is: `WORKYARD_PLUGIN_DIR`, the app bundle's resources, or a
-/// checkout above the running binary (`target/debug/workyard` inside the repository).
+/// Where the Workyard plugin is: `WORKYARD_PLUGIN_DIR`, the app bundle's resources, a Homebrew
+/// layout (`<prefix>/share/workyard/plugin`), or a checkout above the running binary
+/// (`target/debug/workyard` inside the repository).
 fn find_plugin_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("WORKYARD_PLUGIN_DIR") {
         return Some(PathBuf::from(dir));
     }
-    let exe = std::env::current_exe().ok()?;
+    plugin_dir_for_exe(&std::env::current_exe().ok()?)
+}
+
+/// The plugin directory for a given executable path. Homebrew links `bin/workyard` into the
+/// prefix, so the real path (symlinks resolved) is tried first, then the path as given.
+fn plugin_dir_for_exe(exe: &std::path::Path) -> Option<PathBuf> {
     let is_plugin = |dir: &PathBuf| dir.join(".claude-plugin/plugin.json").exists();
-    let bundled = exe.parent()?.parent()?.join("Resources/marketplace/plugin");
-    if is_plugin(&bundled) {
-        return Some(bundled);
+    let real = exe.canonicalize().ok();
+    for exe in real.iter().map(|p| p.as_path()).chain([exe]) {
+        let dir = exe.parent()?;
+        let bundled = dir.parent()?.join("Resources/marketplace/plugin");
+        let brew = dir.join("../share/workyard/plugin");
+        for candidate in [bundled, brew] {
+            if is_plugin(&candidate) {
+                return Some(candidate.canonicalize().unwrap_or(candidate));
+            }
+        }
+        if let Some(found) = exe.ancestors().map(|dir| dir.join("plugin")).find(is_plugin) {
+            return Some(found);
+        }
     }
-    exe.ancestors().map(|dir| dir.join("plugin")).find(is_plugin)
+    None
 }
 
 /// Copies this executable to `<db>.bin/workyard` (only when it differs) so that rebuilding the
@@ -1287,7 +1308,18 @@ fn follow_events(store: &Store, mut cursor: i64, limit: i64) -> workyard_core::R
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion && std::env::args().any(|a| a == "--json") => {
+            println!("{}", json!({"ok":true,"data":{"version":env!("CARGO_PKG_VERSION"),"schema_version":workyard_core::SCHEMA_VERSION}}));
+            return;
+        }
+        Err(error) => error.exit(),
+    };
+    if let Command::Doctor = &cli.command {
+        let path = cli.db.clone().map(Ok).unwrap_or_else(Store::default_path);
+        std::process::exit(doctor::run(path, cli.json));
+    }
     if let Command::Events {
         since,
         limit,
@@ -1374,6 +1406,23 @@ fn exit_code(error: &Error) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_is_found_in_a_homebrew_layout_through_a_symlink() {
+        let root = std::env::temp_dir().join(format!("workyard-brew-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cellar = root.join("Cellar/workyard/0.1.0");
+        std::fs::create_dir_all(cellar.join("bin")).unwrap();
+        std::fs::create_dir_all(cellar.join("share/workyard/plugin/.claude-plugin")).unwrap();
+        std::fs::write(cellar.join("share/workyard/plugin/.claude-plugin/plugin.json"), "{}").unwrap();
+        std::fs::write(cellar.join("bin/workyard"), "").unwrap();
+        // <prefix>/bin/workyard -> ../Cellar/workyard/0.1.0/bin/workyard, as Homebrew links it.
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::os::unix::fs::symlink("../Cellar/workyard/0.1.0/bin/workyard", root.join("bin/workyard")).unwrap();
+        let found = plugin_dir_for_exe(&root.join("bin/workyard")).expect("plugin found");
+        assert_eq!(found, cellar.join("share/workyard/plugin").canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn full_permissions_turn_checks_off_and_safe_ones_allow_a_list() {
