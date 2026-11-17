@@ -17,6 +17,9 @@ use crate::notify::{Notifier, Silent};
 use crate::runner::{LimitHit, Launch, PermissionAnswer, PermissionAsk, Runner, Worker, WorkerState, Workspace};
 use crate::worktree::{branch_for, check_main_checkout, current_branch, remove_merged, worktree_path};
 
+/// Consecutive passes with no unfinished work before the orchestrator stops by itself.
+const FINISHED_PASSES: u32 = 3;
+
 pub struct Options {
     pub holder: String,
     /// Maximum concurrent workers; stored on the board and kept across restarts when `None`.
@@ -193,6 +196,7 @@ impl<'a> Orchestrator<'a> {
         self.reconcile(actor);
         let renew_every = Duration::from_secs((self.opts.lease_seconds / 3).max(1) as u64);
         let mut last_heartbeat = Instant::now();
+        let mut finished_passes = 0u32;
         while !stop.load(Ordering::SeqCst) {
             // Read the marker first so a commit during this pass wakes the next wait.
             let marker = self.store.tick_marker();
@@ -214,6 +218,19 @@ impl<'a> Orchestrator<'a> {
             let status = self.store.orchestrator_status(&self.board)?;
             if status["desired_state"] == "running" {
                 self.dispatch_all(actor, stop)?;
+            }
+            // Every card is Done or cancelled and nothing is asked or running: the board has no
+            // work left, so stop instead of idling forever. Three quiet passes in a row, so a
+            // card or question added a moment ago is seen; a restart picks up later work.
+            if self.live.is_empty() && self.store.board_work_finished(&self.board).unwrap_or(false) {
+                finished_passes += 1;
+                if finished_passes >= FINISHED_PASSES {
+                    eprintln!("board {} has no unfinished work left; stopping the orchestrator", self.board);
+                    self.notifier.notify("Workyard", &format!("Board {} is finished; the orchestrator stopped", self.board));
+                    break;
+                }
+            } else {
+                finished_passes = 0;
             }
             self.store.wait_for_tick(&marker, self.opts.idle_wait);
         }

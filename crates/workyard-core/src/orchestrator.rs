@@ -228,6 +228,28 @@ pub fn parse_env_pair(text: &str) -> Result<(String, String)> {
 }
 
 impl Store {
+    /// Whether a board has run out of work: it has at least one card, every card is Done or
+    /// cancelled, no question is open and no task session is attached. An empty board is not
+    /// finished (a planner may still be filling it).
+    pub fn board_work_finished(&self, board: &str) -> Result<bool> {
+        let db = self.open()?;
+        let board_id = resolve_board(&db, board)?;
+        let (total, unfinished): (i64, i64) = db.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN l.kind!='done' THEN 1 ELSE 0 END),0) \
+             FROM cards c JOIN lanes l ON l.id=c.lane_id WHERE c.board_id=?1 AND c.cancelled_at IS NULL",
+            [&board_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let open_questions: i64 =
+            db.query_row("SELECT COUNT(*) FROM questions WHERE board_id=?1 AND status='open'", [&board_id], |r| r.get(0))?;
+        let attached: i64 = db.query_row(
+            "SELECT COUNT(*) FROM task_sessions s JOIN cards c ON c.id=s.card_id WHERE c.board_id=?1 AND s.detached_at IS NULL",
+            [&board_id],
+            |r| r.get(0),
+        )?;
+        Ok(total > 0 && unfinished == 0 && open_questions == 0 && attached == 0)
+    }
+
     /// The environment every worker of the board starts with: the board's stored defaults.
     pub fn board_worker_env(&self, board: &str) -> Result<BTreeMap<String, String>> {
         let db = self.open()?;

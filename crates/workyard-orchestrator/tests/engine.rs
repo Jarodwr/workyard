@@ -1101,3 +1101,25 @@ fn workers_get_board_env_with_run_flags_overriding_and_status_shows_only_names()
     assert_eq!(status["worker_env_keys"], serde_json::json!(["A", "CARGO_TARGET_DIR"]));
     assert!(!status.to_string().contains("/tmp/run"), "values never appear in status");
 }
+
+#[test]
+fn the_orchestrator_stops_by_itself_once_every_card_is_done_but_not_on_an_empty_board() {
+    let empty = Harness::new();
+    let idle = empty.start(1, 3, |_, _| {});
+    std::thread::sleep(Duration::from_millis(4500));
+    assert!(!idle.is_finished(), "an empty board is still being planned: keep running");
+    empty.finish(idle);
+
+    let h = Harness::new();
+    h.card("One");
+    h.card("Two");
+    let handle = h.start(2, 3, |launch, store| finish_card(launch, store));
+    wait_until("the orchestrator exits on its own", || handle.is_finished());
+    handle.join().unwrap().unwrap();
+    assert_eq!(h.done_count(&h.store), 2);
+    assert!(h.store.orchestrator_status(&h.board).unwrap()["holder"].is_null(), "lease released");
+    assert!(
+        h.notices.lock().unwrap().iter().any(|(_, body)| body.contains("is finished")),
+        "the human is told the board finished"
+    );
+}

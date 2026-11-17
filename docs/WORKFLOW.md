@@ -33,6 +33,8 @@ workyard orch run B-1 --cwd /path/to/repo --pool 2
 - After you rebuild `workyard`, `workyard orch restart B-1` drains the board and relaunches the orchestrator on the new binary; workers run from a stable copy in `<db>.bin`, so a rebuild does not break a run in progress.
 - macOS notifications tell you when a question needs an answer, a commit needs review, a card needs a human, or the board is waiting on a usage limit. Add `--no-notify` to silence them.
 
+The orchestrator stops by itself, with a notification, once every card is Done or cancelled and no question is open. Add more work and press **Start** again to continue.
+
 ## 3. Supervise
 
 | You want to | Do this |
