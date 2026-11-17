@@ -226,6 +226,9 @@ fn start_orchestrator(board: String, supervisor: Option<bool>) -> Result<Value, 
     for _ in 0..40 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok(Some(exit)) = child.try_wait() {
+            if exit.success() {
+                break; // a board with no work left stops by itself: not a failure
+            }
             // It stopped at once: the log says why (another orchestrator, claude not found, ...).
             let mut tail = String::new();
             if let Ok(mut file) = std::fs::File::open(&log_path) {
